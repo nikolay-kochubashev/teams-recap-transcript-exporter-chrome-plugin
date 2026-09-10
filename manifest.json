@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "Teams Recap Transcript Exporter",
+  "version": "1.6.0",
+  "description": "Exports Microsoft Teams Recap transcripts to TXT with Windows Documents integration.",
+  "permissions": [
+    "sidePanel",
+    "downloads",
+    "clipboardWrite",
+    "nativeMessaging"
+  ],
+  "host_permissions": [
+    "https://*.sharepoint.com/*",
+    "https://teams.microsoft.com/*",
+    "https://*.teams.microsoft.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.sharepoint.com/*",
+        "https://teams.microsoft.com/*",
+        "https://*.teams.microsoft.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Teams Recap Transcript Exporter"
+  },
+  "side_panel": {
+    "default_path": "panel.html"
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA6eGK5nywxa/zJE8fAYsNYobhhUw0yMvS2MjnGQz9es33lYWGKYfsav57xDTFfEtzbCTmYxWHIIbQKJEcDevdoyExqmoGSa9KXH+bhJ0LqPbsZvfto8/xJAOgiHMQO7Sr8RPNbUBXbrmvc1WFolzImdeujLQusgIEPBTD/B8PplbABBgVUdllBa2KRTGepEgN7OrdGAQM/xHMwWsWFmPEn5oRct1ajNS9lyBtjiDvWWZjYgshn+RjaHhSJhZlwjQ72IueGslNoSVpLtGZ17D0tezJQxXjVsR2IQybQTRCc5WfGVtxGnG88XkbpM6vadXH29n5/3ZAUinYC5AIELQAEwIDAQAB"
+}

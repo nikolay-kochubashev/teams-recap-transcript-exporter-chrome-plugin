@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Teams Recap Transcript Exporter</title>
+  <link rel="stylesheet" href="panel.css" />
+</head>
+<body>
+  <main>
+    <h1>Teams Recap Transcript Exporter</h1>
+    <p class="hint">Открой Recap -> Transcript. Один проход вперед по lazy-loaded Transcript. Сбор продолжится, даже если закрыть эту панель.</p>
+
+    <div class="actions primary-actions">
+      <button id="extract" class="primary">Собрать транскрипцию</button>
+      <button id="stop" disabled>Остановить</button>
+    </div>
+
+    <div class="progress-wrap">
+      <div class="progress"><div id="progressBar"></div></div>
+      <div id="progressText" class="progress-text"></div>
+    </div>
+
+    <div id="status" class="status">Готово к работе.</div>
+    <div id="saveMode" class="save-mode"></div>
+
+    <textarea id="output" readonly placeholder="Здесь появится собранная транскрипция"></textarea>
+
+    <div class="actions">
+      <button id="copy" disabled>Копировать</button>
+      <button id="txt" disabled>Сохранить TXT</button>
+      <button id="showFolder" disabled>Открыть каталог</button>
+    </div>
+
+    <div class="actions secondary-actions">
+      <button id="debug">Сохранить диагностику</button>
+      <button id="clear">Очистить результат</button>
+    </div>
+  </main>
+  <script src="panel.js"></script>
+</body>
+</html>

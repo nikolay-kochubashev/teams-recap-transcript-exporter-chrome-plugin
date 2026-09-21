@@ -238,3 +238,18 @@ textarea {
   word-break: break-word;
   color: #333;
 }
+
+.meeting-error-detail {
+  margin-top: 5px;
+  font-size: 11px;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.meeting-error-detail.error {
+  color: #a4262c;
+}
+
+.meeting-error-detail.skip {
+  color: #8a5a00;
+}

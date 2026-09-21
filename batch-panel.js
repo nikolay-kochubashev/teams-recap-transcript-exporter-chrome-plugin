@@ -125,8 +125,7 @@
   function renderMeetingList(state) {
     const meetings = state?.meetings || [];
     const logs = new Map((state?.logs || []).map(x => [x.meetingId, x]));
-    const oldSelected = new Set(selectedMeetingIds());
-    const selected = oldSelected.size ? oldSelected : new Set(state?.selectedIds || meetings.map(m => m.id));
+    const selected = new Set(state?.selectedIds || []);
 
     meetingCountEl.textContent = meetings.length ? `${meetings.length} встреч` : '';
     if (!meetings.length) {
@@ -146,8 +145,11 @@
       check.dataset.meetingId = meeting.id;
       check.checked = selected.has(meeting.id);
       check.disabled = state?.status === 'running';
-      check.addEventListener('change', () => {
-        startBatchBtn.disabled = !batchNativeAvailable || !selectedMeetingIds().length || batchState?.status === 'running';
+      check.addEventListener('change', async () => {
+        const ids = selectedMeetingIds();
+        await runtimeMessage({ type: 'BATCH_SET_SELECTION', selectedIds: ids });
+        if (batchState) batchState.selectedIds = ids;
+        startBatchBtn.disabled = !batchNativeAvailable || !ids.length || batchState?.status === 'running';
         syncSelectAll();
       });
 
@@ -202,7 +204,7 @@
     const meetings = batchState.meetings || [];
     const selected = batchState.selectedIds || [];
     const terminal = (batchState.logs || []).filter(x => ['done', 'skip', 'error'].includes(x.status)).length;
-    const total = selected.length || meetings.length;
+    const total = selected.length;
     const progress = total ? Math.round((terminal / total) * 100) : 0;
 
     batchStatusEl.textContent = batchState.message || 'Пакетный режим готов.';
@@ -255,9 +257,14 @@
     }
   });
 
-  selectAllEl.addEventListener('change', () => {
-    for (const el of meetingListEl.querySelectorAll('input[data-meeting-id]')) el.checked = selectAllEl.checked;
-    startBatchBtn.disabled = !batchNativeAvailable || !selectedMeetingIds().length || batchState?.status === 'running';
+  selectAllEl.addEventListener('change', async () => {
+    const checked = selectAllEl.checked;
+    for (const el of meetingListEl.querySelectorAll('input[data-meeting-id]')) el.checked = checked;
+    const ids = selectedMeetingIds();
+    await runtimeMessage({ type: 'BATCH_SET_SELECTION', selectedIds: ids });
+    if (batchState) batchState.selectedIds = ids;
+    startBatchBtn.disabled = !batchNativeAvailable || !ids.length || batchState?.status === 'running';
+    syncSelectAll();
   });
 
   startBatchBtn.addEventListener('click', async () => {

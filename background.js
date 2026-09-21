@@ -1,3 +1,5 @@
+importScripts('batch-background.js');
+
 async function configureSidePanel() {
   try {
     await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });

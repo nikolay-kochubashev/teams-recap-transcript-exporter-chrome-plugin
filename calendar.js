@@ -147,6 +147,14 @@
         href,
         ordinal,
         score: item.score,
+        dom: {
+          tag: item.el.tagName,
+          role: item.el.getAttribute('role') || '',
+          dataTid: item.el.getAttribute('data-tid') || '',
+          dataTestId: item.el.getAttribute('data-testid') || '',
+          ariaLabel: item.el.getAttribute('aria-label') || '',
+          className: typeof item.el.className === 'string' ? item.el.className.slice(0, 300) : ''
+        },
         rect: {
           top: Math.round(item.r.top),
           left: Math.round(item.r.left),
@@ -266,7 +274,7 @@
       '',
       `Meetings found: ${meetings.length}`
     ];
-    meetings.forEach((m, i) => lines.push(`[M${i + 1}] id=${m.id} score=${m.score} date=${m.dateStamp || '-'} rect=${JSON.stringify(m.rect)} label=${m.label}`));
+    meetings.forEach((m, i) => lines.push(`[M${i + 1}] id=${m.id} score=${m.score} date=${m.dateStamp || '-'} rect=${JSON.stringify(m.rect)} dom=${JSON.stringify(m.dom || {})} label=${m.label}`));
     lines.push('', `Actions found: ${actions.length}`);
     actions.forEach((a, i) => lines.push(`[A${i + 1}] kind=${a.kind} label=${a.label} href=${a.href || '-'}`));
     lines.push('', `Recording links found: ${links.length}`);

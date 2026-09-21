@@ -1,5 +1,5 @@
 const NATIVE_HOST = 'com.openai.teams_recap_transcript_exporter';
-const BATCH_KEY = 'teamsTranscriptBatchStateV2';
+const BATCH_KEY = 'teamsTranscriptBatchStateV3';
 
 let stopRequested = false;
 let runPromise = null;
@@ -367,25 +367,41 @@ async function discoverRecordingUrls(tempTabId) {
   return [...new Set(urls)];
 }
 
-async function ensureCalendarMeetingVisible(tabId, meetingId) {
-  for (let attempt = 0; attempt < 8; attempt++) {
+async function restoreCalendarForMeeting(tabId, meeting, timeoutMs = 30000) {
+  const started = Date.now();
+  let backAttempts = 0;
+
+  while (Date.now() - started < timeoutMs) {
     try {
-      const response = await sendTab(tabId, { type: 'CALENDAR_SCAN' }, 3500);
-      if (response?.ok && (response.meetings || []).some(m => m.id === meetingId)) {
-        return true;
+      const response = await sendTab(tabId, { type: 'CALENDAR_SCAN' }, 4000);
+      const found = (response?.meetings || []).some(m =>
+        m.id === meeting.id ||
+        (m.label && meeting.label && m.label === meeting.label) ||
+        (m.title === meeting.title && m.dateStamp === meeting.dateStamp && m.startTime === meeting.startTime)
+      );
+      if (response?.ok && found) {
+        return { ok: true, url: response.url || '' };
       }
     } catch (_) {}
 
+    if (backAttempts >= 6) break;
+
     try {
-      await appendOperation('CALENDAR_RESTORE_BACK', { tabId, meetingId, attempt: attempt + 1 });
+      await appendOperation('CALENDAR_RESTORE_BACK', {
+        tabId,
+        meetingId: meeting.id,
+        attempt: backAttempts + 1
+      });
       await chrome.tabs.goBack(tabId);
-      await waitTabComplete(tabId, 15000);
-      await delay(700);
+      backAttempts++;
+      await waitTabComplete(tabId, 20000);
+      await delay(1200);
     } catch (_) {
       break;
     }
   }
-  return false;
+
+  return { ok: false };
 }
 
 async function processMeeting(meeting, index) {
@@ -394,6 +410,8 @@ async function processMeeting(meeting, index) {
     index,
     title: meeting.title || meeting.label,
     label: meeting.label,
+    dateStamp: meeting.dateStamp || '',
+    startTime: meeting.startTime || '',
     dom: meeting.dom || {},
     rect: meeting.rect || {}
   });
@@ -412,18 +430,18 @@ async function processMeeting(meeting, index) {
   const calendarTabId = batchState.calendarTabId;
 
   try {
-    const available = await ensureCalendarMeetingVisible(calendarTabId, meeting.id);
-    if (!available) {
+    const restoredBefore = await restoreCalendarForMeeting(calendarTabId, meeting, 20000);
+    if (!restoredBefore.ok) {
       await appendOperation('MEETING_NOT_VISIBLE_IN_CALENDAR', {
         meetingId: meeting.id,
         calendarTabId
       }, 'ERROR');
-      throw new Error('Встреча не найдена в исходной вкладке календаря. Не меняй отображаемую неделю во время пакетного сбора.');
+      throw new Error('Не удалось восстановить календарь с выбранной встречей. Обнови Calendar, заново нажми "Считать календарь" и повтори запуск.');
     }
 
     const opened = await sendTab(
       calendarTabId,
-      { type: 'CALENDAR_OPEN_MEETING', id: meeting.id },
+      { type: 'CALENDAR_OPEN_MEETING', meeting },
       12000
     );
 
@@ -443,7 +461,7 @@ async function processMeeting(meeting, index) {
       target: opened.target || {}
     });
 
-    await delay(900);
+    await delay(1600);
 
     const urls = await discoverRecordingUrls(calendarTabId);
 
@@ -473,8 +491,6 @@ async function processMeeting(meeting, index) {
     for (let i = 0; i < urls.length; i++) {
       if (stopRequested) throw new Error('Остановлено пользователем.');
 
-      // Recording is always processed in its own background tab.
-      // The original Teams Calendar tab remains the navigation/state anchor.
       const file = await processRecordingUrl(urls[i], meeting, i, null);
       files.push(file);
     }
@@ -508,12 +524,13 @@ async function processMeeting(meeting, index) {
       files: []
     });
   } finally {
-    const restored = await ensureCalendarMeetingVisible(calendarTabId, meeting.id);
+    const restored = await restoreCalendarForMeeting(calendarTabId, meeting, 30000);
     await appendOperation('CALENDAR_RESTORE_RESULT', {
       meetingId: meeting.id,
       calendarTabId,
-      restored
-    }, restored ? 'INFO' : 'WARN');
+      restored: restored.ok,
+      url: restored.url || ''
+    }, restored.ok ? 'INFO' : 'WARN');
   }
 }
 

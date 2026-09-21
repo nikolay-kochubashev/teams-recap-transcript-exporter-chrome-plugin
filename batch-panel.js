@@ -111,6 +111,14 @@
     selectAllEl.indeterminate = checked.length > 0 && checked.length < all.length;
   }
 
+  function formatMeetingDateTime(meeting) {
+    const stamp = meeting?.dateStamp || '';
+    const date = /^\d{8}$/.test(stamp)
+      ? `${stamp.slice(6, 8)}.${stamp.slice(4, 6)}.${stamp.slice(0, 4)}`
+      : '';
+    return [date, meeting?.startTime || ''].filter(Boolean).join(' ');
+  }
+
   function statusLabel(status) {
     const map = {
       pending: 'Ожидает',
@@ -157,10 +165,22 @@
       const title = document.createElement('div');
       title.className = 'meeting-title';
       title.textContent = meeting.title || meeting.label;
-      const meta = document.createElement('div');
-      meta.className = 'meeting-meta';
-      meta.textContent = meeting.label;
-      content.append(title, meta);
+      const metaText = formatMeetingDateTime(meeting);
+      if (metaText) {
+        const meta = document.createElement('div');
+        meta.className = 'meeting-meta';
+        meta.textContent = metaText;
+        content.append(title, meta);
+      } else {
+        content.append(title);
+      }
+
+      if (log.message && ['error', 'skip'].includes(log.status)) {
+        const detail = document.createElement('div');
+        detail.className = `meeting-error-detail ${log.status}`;
+        detail.textContent = log.message;
+        content.append(detail);
+      }
 
       const badge = document.createElement('span');
       badge.className = `meeting-status ${log.status || 'pending'}`;

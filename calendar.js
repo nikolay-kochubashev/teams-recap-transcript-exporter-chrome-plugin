@@ -208,17 +208,21 @@
 
   function cleanMeetingTitle(text) {
     let s = normalize(text);
-
-    // Teams exposes calendar cards as verbose accessibility labels:
-    // "<title>, 14 September 2026 11:30 to 12:00, organised by ..., Press Shift+F10..."
-    // Keep only the human meeting title.
-    s = s.replace(/,?\s*Press Shift\+F10 for more options.*$/i, '');
-    s = s.replace(/,?\s*(?:Recurring meeting|Microsoft Teams meeting|Teams meeting).*$/i, '');
-    s = s.replace(/,?\s*(?:organised|organized) by\b.*$/i, '');
-    s = s.replace(/,?\s*location\s*:\s*.*$/i, '');
+    if (!s) return '';
 
     const names = Object.keys(monthNames).sort((a, b) => b.length - a.length).join('|');
-    const dateTail = new RegExp(',?\\s*\\d{1,2}\\s+(?:' + names + ')\\s+20\\d{2}\\b.*
+    const dateTail = new RegExp(',?\\s*\\d{1,2}\\s+(?:' + names + ')\\s+20\\d{2}\\b.*$', 'i');
+
+    s = s.replace(dateTail, '');
+    s = s.replace(/,?\s*location\s*:\s*.*$/i, '');
+    s = s.replace(/,?\s*(?:organised|organized) by\b.*$/i, '');
+    s = s.replace(/,?\s*(?:Recurring meeting|Microsoft Teams meeting|Teams meeting).*$/i, '');
+    s = s.replace(/,?\s*Press Shift\+F10 for more options.*$/i, '');
+    s = s.replace(/[\s,;:-]+$/g, '').replace(/\s+/g, ' ').trim();
+
+    if (s.length > 180) s = s.slice(0, 180).trim();
+    return s || normalize(text).slice(0, 180);
+  }
 
   function scanCalendarMeetings() {
     const pool = Array.from(document.querySelectorAll([

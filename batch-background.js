@@ -692,12 +692,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           path: batchState.folderPath
         });
 
-        if (response?.ok && response.text) {
-          const ops = (batchState.operationLog || []).map(x =>
-            `[${x.ts}] ${x.level} ${x.step} ${JSON.stringify(x)}`
-          ).join('\n');
-          response.text += '\n\n=== BATCH OPERATION LOG ===\n' + ops;
-        }
         sendResponse(response);
       } catch (e) {
         sendResponse({ ok: false, error: e?.message || String(e) });
@@ -714,6 +708,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           { type: 'CALENDAR_DEBUG' },
           10000
         );
+
+        if (response?.ok && response.text) {
+          const ops = (batchState.operationLog || []).map(x =>
+            `[${x.ts}] ${x.level} ${x.step} ${JSON.stringify(x)}`
+          ).join('\n');
+          response.text += '\n\n=== BATCH OPERATION LOG ===\n' + ops;
+        }
 
         sendResponse(response);
       } catch (e) {

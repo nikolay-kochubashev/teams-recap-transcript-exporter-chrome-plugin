@@ -9,33 +9,78 @@
 <body>
   <main>
     <h1>Teams Recap Transcript Exporter</h1>
-    <p class="hint">Открой Recap -> Transcript. Один проход вперед по lazy-loaded Transcript. Сбор продолжится, даже если закрыть эту панель.</p>
 
-    <div class="actions primary-actions">
-      <button id="extract" class="primary">Собрать транскрипцию</button>
-      <button id="stop" disabled>Остановить</button>
+    <div class="mode-tabs">
+      <button id="modeCurrent" class="mode-tab active">Текущая встреча</button>
+      <button id="modeBatch" class="mode-tab">Пакет из календаря</button>
     </div>
 
-    <div class="progress-wrap">
-      <div class="progress"><div id="progressBar"></div></div>
-      <div id="progressText" class="progress-text"></div>
-    </div>
+    <section id="currentSection">
+      <p class="hint">Открой Recap -> Transcript. Один проход вперед по lazy-loaded Transcript.</p>
 
-    <div id="status" class="status">Готово к работе.</div>
-    <div id="saveMode" class="save-mode"></div>
+      <div class="actions primary-actions">
+        <button id="extract" class="primary">Собрать транскрипцию</button>
+        <button id="stop" disabled>Остановить</button>
+      </div>
 
-    <textarea id="output" readonly placeholder="Здесь появится собранная транскрипция"></textarea>
+      <div class="progress-wrap">
+        <div class="progress"><div id="progressBar"></div></div>
+        <div id="progressText" class="progress-text"></div>
+      </div>
 
-    <div class="actions">
-      <button id="copy" disabled>Копировать</button>
-      <button id="txt" disabled>Сохранить TXT</button>
-      <button id="showFolder" disabled>Открыть каталог</button>
-    </div>
+      <div id="status" class="status">Готово к работе.</div>
+      <div id="saveMode" class="save-mode"></div>
 
-    <div class="actions secondary-actions">
-      <button id="debug">Сохранить диагностику</button>
-      <button id="clear">Очистить результат</button>
-    </div>
+      <textarea id="output" readonly placeholder="Здесь появится собранная транскрипция"></textarea>
+
+      <div class="actions">
+        <button id="copy" disabled>Копировать</button>
+        <button id="txt" disabled>Сохранить TXT</button>
+        <button id="showFolder" disabled>Открыть каталог</button>
+      </div>
+
+      <div class="actions secondary-actions">
+        <button id="debug">Сохранить диагностику</button>
+        <button id="clear">Очистить результат</button>
+      </div>
+    </section>
+
+    <section id="batchSection" hidden>
+      <p class="hint">Открой Calendar в Teams Web. Расширение считает встречи из текущего отображаемого диапазона и последовательно найдет Recap/Recording для выбранных встреч.</p>
+
+      <div class="actions primary-actions">
+        <button id="scanCalendar" class="primary">Считать календарь</button>
+        <button id="calendarDiagnostic">Диагностика календаря</button>
+      </div>
+
+      <div id="batchStatus" class="status">Открой Teams Calendar и нажми "Считать календарь".</div>
+      <div id="batchSaveMode" class="save-mode"></div>
+
+      <div class="batch-toolbar">
+        <label class="check-label"><input type="checkbox" id="selectAll" checked /> Выбрать все</label>
+        <span id="meetingCount" class="muted"></span>
+      </div>
+
+      <div id="meetingList" class="meeting-list">
+        <div class="empty">Встречи пока не считаны.</div>
+      </div>
+
+      <div class="actions primary-actions batch-actions">
+        <button id="startBatch" class="primary" disabled>Собрать выбранные</button>
+        <button id="stopBatch" disabled>Остановить</button>
+      </div>
+
+      <div class="progress-wrap">
+        <div class="progress"><div id="batchProgressBar"></div></div>
+        <div id="batchProgressText" class="progress-text"></div>
+      </div>
+
+      <div class="actions">
+        <button id="openBatchFolder" disabled>Открыть папку</button>
+      </div>
+
+      <div id="batchLog" class="batch-log"></div>
+    </section>
   </main>
   <script src="panel.js"></script>
 </body>

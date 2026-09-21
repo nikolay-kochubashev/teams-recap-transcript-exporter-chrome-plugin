@@ -5,6 +5,8 @@
   let batchPollTimer = null;
 
   const currentSection = document.getElementById('currentSection');
+  const versionBadge = document.getElementById('versionBadge');
+  if (versionBadge) versionBadge.textContent = `v${chrome.runtime.getManifest().version}`;
   const batchSection = document.getElementById('batchSection');
   const modeCurrentBtn = document.getElementById('modeCurrent');
   const modeBatchBtn = document.getElementById('modeBatch');

@@ -150,7 +150,7 @@ async function scanCalendar(tabId) {
   await patchBatch({
     calendarTabId: tabId,
     meetings,
-    selectedIds: meetings.map(m => m.id),
+    selectedIds: [],
     currentIndex: -1,
     status: 'ready',
     message: `Найдено встреч: ${meetings.length}.`,
@@ -579,6 +579,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       try {
         const meetings = await scanCalendar(message.tabId);
         sendResponse({ ok: true, meetings, state: batchState });
+      } catch (e) {
+        sendResponse({ ok: false, error: e?.message || String(e) });
+      }
+    })();
+    return true;
+  }
+
+  if (type === 'BATCH_SET_SELECTION') {
+    (async () => {
+      try {
+        const validIds = new Set((batchState.meetings || []).map(m => m.id));
+        const selectedIds = (Array.isArray(message.selectedIds) ? message.selectedIds : [])
+          .filter(id => validIds.has(id));
+        await patchBatch({ selectedIds });
+        sendResponse({ ok: true, selectedIds, state: batchState });
       } catch (e) {
         sendResponse({ ok: false, error: e?.message || String(e) });
       }

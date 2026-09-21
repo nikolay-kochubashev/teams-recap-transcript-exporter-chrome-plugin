@@ -2,8 +2,9 @@
   if (window.__teamsTranscriptCalendarLoaded) return;
   window.__teamsTranscriptCalendarLoaded = true;
 
-  const VERSION = '2.0.0';
+  const VERSION = '2.0.1';
   let actionMap = new Map();
+  let lastCalendarScanDebug = { rejectedSlots: [], candidateCount: 0, acceptedCount: 0 };
 
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const normalize = value => (value || '')
@@ -55,6 +56,22 @@
     return '';
   }
 
+  function isCalendarAggregateSlot(text) {
+    const value = normalize(text);
+    if (!value) return false;
+
+    // Teams calendar time-grid cells expose accessibility labels such as:
+    // "21 September 00:00 to 21 September 00:30. 0 events".
+    // They describe a slot, not an actual meeting card.
+    if (/\b\d+\s+events?\b/i.test(value)) return true;
+
+    if (
+      /\b\d{1,2}\s+[A-Za-zА-Яа-яЁё]+\s+\d{1,2}:\d{2}\s+to\s+\d{1,2}\s+[A-Za-zА-Яа-яЁё]+\s+\d{1,2}:\d{2}\b/i.test(value)
+    ) return true;
+
+    return false;
+  }
+
   function meetingCandidateScore(el, text) {
     const attr = normalize([
       el.getAttribute('data-tid'),
@@ -64,6 +81,7 @@
       el.getAttribute('aria-label')
     ].filter(Boolean).join(' '));
     const lower = `${attr} ${text}`.toLowerCase();
+    if (isCalendarAggregateSlot(text)) return -1000;
     let score = 0;
 
     if (/calendar|event|appointment|meeting/.test(lower)) score += 80;
@@ -106,9 +124,26 @@
     ].join(',')));
 
     const raw = [];
+    const rejectedSlots = [];
     for (const el of pool) {
       if (!isRendered(el)) continue;
       const text = accessibleText(el);
+
+      if (isCalendarAggregateSlot(text)) {
+        if (rejectedSlots.length < 80) {
+          rejectedSlots.push({
+            text: text.slice(0, 300),
+            tag: el.tagName,
+            role: el.getAttribute('role') || '',
+            dataTid: el.getAttribute('data-tid') || '',
+            dataTestId: el.getAttribute('data-testid') || '',
+            ariaLabel: (el.getAttribute('aria-label') || '').slice(0, 300),
+            className: typeof el.className === 'string' ? el.className.slice(0, 300) : ''
+          });
+        }
+        continue;
+      }
+
       const score = meetingCandidateScore(el, text);
       if (score < 55) continue;
 
@@ -165,7 +200,13 @@
       seenBoxes.push(item.r);
     }
 
-    return meetings.slice(0, 120);
+    const result = meetings.slice(0, 120);
+    lastCalendarScanDebug = {
+      rejectedSlots,
+      candidateCount: raw.length,
+      acceptedCount: result.length
+    };
+    return result;
   }
 
   function findMeetingElementById(id) {
@@ -275,6 +316,13 @@
       `Meetings found: ${meetings.length}`
     ];
     meetings.forEach((m, i) => lines.push(`[M${i + 1}] id=${m.id} score=${m.score} date=${m.dateStamp || '-'} rect=${JSON.stringify(m.rect)} dom=${JSON.stringify(m.dom || {})} label=${m.label}`));
+    lines.push(
+      '',
+      `Calendar scan: candidates=${lastCalendarScanDebug.candidateCount || 0}, accepted=${lastCalendarScanDebug.acceptedCount || 0}, rejectedSlots=${(lastCalendarScanDebug.rejectedSlots || []).length}`
+    );
+    (lastCalendarScanDebug.rejectedSlots || []).slice(0, 40).forEach((x, i) =>
+      lines.push(`[REJECTED_SLOT ${i + 1}] ${JSON.stringify(x)}`)
+    );
     lines.push('', `Actions found: ${actions.length}`);
     actions.forEach((a, i) => lines.push(`[A${i + 1}] kind=${a.kind} label=${a.label} href=${a.href || '-'}`));
     lines.push('', `Recording links found: ${links.length}`);

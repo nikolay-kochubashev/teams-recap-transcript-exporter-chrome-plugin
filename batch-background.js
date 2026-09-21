@@ -13,7 +13,8 @@ let batchState = {
   startedAt: 0,
   finishedAt: 0,
   message: 'Пакетный режим готов.',
-  logs: []
+  logs: [],
+  operationLog: []
 };
 
 async function restoreBatchState() {
@@ -36,6 +37,18 @@ async function persistBatchState() {
 async function patchBatch(patch) {
   batchState = { ...batchState, ...patch };
   await persistBatchState();
+}
+
+async function appendOperation(step, details = {}, level = 'INFO') {
+  const operationLog = Array.isArray(batchState.operationLog) ? [...batchState.operationLog] : [];
+  operationLog.push({
+    ts: new Date().toISOString(),
+    level,
+    step,
+    ...details
+  });
+  if (operationLog.length > 500) operationLog.splice(0, operationLog.length - 500);
+  await patchBatch({ operationLog });
 }
 
 async function logMeeting(meetingId, patch) {
@@ -118,9 +131,22 @@ function todayStamp() {
 }
 
 async function scanCalendar(tabId) {
+  await appendOperation('SCAN_CALENDAR_START', { tabId });
   const response = await sendTab(tabId, { type: 'CALENDAR_SCAN' }, 10000);
   if (!response?.ok) throw new Error(response?.error || 'Не удалось прочитать календарь Teams.');
   const meetings = (response.meetings || []).map(m => ({ ...m, status: 'pending' }));
+  await appendOperation('SCAN_CALENDAR_RESULT', {
+    tabId,
+    count: meetings.length,
+    meetings: meetings.slice(0, 30).map(m => ({
+      id: m.id,
+      title: m.title,
+      label: m.label,
+      score: m.score,
+      dom: m.dom || {},
+      rect: m.rect || {}
+    }))
+  });
   await patchBatch({
     calendarTabId: tabId,
     meetings,
@@ -216,6 +242,16 @@ async function extractRecordingFromTab(tabId, meeting, recordingUrl, recordingIn
     text: state.text
   });
 
+  await appendOperation('TRANSCRIPT_SAVED', {
+    meetingId: meeting.id,
+    recordingUrl,
+    recordingIndex,
+    fileName,
+    path: saved.path,
+    chars: state.text.length,
+    items: state.items || 0
+  });
+
   return {
     path: saved.path,
     fileName,
@@ -254,9 +290,16 @@ async function processRecordingUrl(url, meeting, index, reuseTabId = null) {
 
 async function discoverRecordingUrls(tempTabId) {
   let tab = await chrome.tabs.get(tempTabId);
+  await appendOperation('DISCOVER_RECORDING_START', { tabId: tempTabId, url: tab.url });
   if (isRecordingUrl(tab.url)) return [tab.url];
 
   let page = await findActionsWithWait(tempTabId, 6000);
+  await appendOperation('DISCOVER_ACTIONS', {
+    tabId: tempTabId,
+    url: tab.url,
+    actions: (page.actions || []).map(a => ({ kind: a.kind, label: a.label, href: a.href || '' })).slice(0, 40),
+    recordingLinks: (page.recordingLinks || []).slice(0, 20)
+  });
   let urls = (page.recordingLinks || []).map(x => x.href).filter(Boolean);
   if (urls.length) return [...new Set(urls)];
 
@@ -325,6 +368,14 @@ async function discoverRecordingUrls(tempTabId) {
 }
 
 async function processMeeting(meeting, index) {
+  await appendOperation('MEETING_START', {
+    meetingId: meeting.id,
+    index,
+    title: meeting.title || meeting.label,
+    label: meeting.label,
+    dom: meeting.dom || {},
+    rect: meeting.rect || {}
+  });
   await logMeeting(meeting.id, {
     status: 'running',
     message: 'Открываю встречу...',
@@ -341,6 +392,11 @@ async function processMeeting(meeting, index) {
   try {
     const duplicate = await chrome.tabs.duplicate(batchState.calendarTabId);
     tempTabId = duplicate.id;
+    await appendOperation('CALENDAR_TAB_DUPLICATED', {
+      meetingId: meeting.id,
+      sourceTabId: batchState.calendarTabId,
+      tempTabId
+    });
 
     await chrome.tabs.update(tempTabId, { active: false });
     await waitTabComplete(tempTabId, 30000);
@@ -353,14 +409,26 @@ async function processMeeting(meeting, index) {
     );
 
     if (!opened?.ok) {
+      await appendOperation('OPEN_MEETING_FAILED', { meetingId: meeting.id, tempTabId, error: opened?.error || '' }, 'ERROR');
       throw new Error(opened?.error || 'Не удалось открыть карточку встречи в календаре.');
     }
 
+    await appendOperation('OPEN_MEETING_OK', { meetingId: meeting.id, tempTabId });
     await delay(800);
 
     const urls = await discoverRecordingUrls(tempTabId);
+    await appendOperation('RECORDING_URLS_RESULT', {
+      meetingId: meeting.id,
+      tempTabId,
+      count: urls.length,
+      urls
+    });
 
     if (!urls.length) {
+      await appendOperation('MEETING_SKIP', {
+        meetingId: meeting.id,
+        reason: 'Запись/Recap не найдены.'
+      }, 'WARN');
       await logMeeting(meeting.id, {
         status: 'skip',
         message: 'Запись/Recap не найдены.',
@@ -383,6 +451,10 @@ async function processMeeting(meeting, index) {
       files.push(file);
     }
 
+    await appendOperation('MEETING_DONE', {
+      meetingId: meeting.id,
+      files: files.map(f => ({ fileName: f.fileName, path: f.path, chars: f.chars, items: f.items }))
+    });
     await logMeeting(meeting.id, {
       status: 'done',
       message: `Сохранено файлов: ${files.length}.`,
@@ -391,6 +463,10 @@ async function processMeeting(meeting, index) {
   } catch (e) {
     if (String(e?.message || e).includes('Остановлено пользователем')) throw e;
 
+    await appendOperation('MEETING_ERROR', {
+      meetingId: meeting.id,
+      error: e?.message || String(e)
+    }, 'ERROR');
     await logMeeting(meeting.id, {
       status: 'error',
       message: e?.message || String(e),
@@ -563,6 +639,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           path: batchState.folderPath
         });
 
+        if (response?.ok && response.text) {
+          const ops = (batchState.operationLog || []).map(x =>
+            `[${x.ts}] ${x.level} ${x.step} ${JSON.stringify(x)}`
+          ).join('\n');
+          response.text += '\n\n=== BATCH OPERATION LOG ===\n' + ops;
+        }
         sendResponse(response);
       } catch (e) {
         sendResponse({ ok: false, error: e?.message || String(e) });

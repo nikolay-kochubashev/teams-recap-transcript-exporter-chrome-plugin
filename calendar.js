@@ -2,7 +2,7 @@
   if (window.__teamsTranscriptCalendarLoaded) return;
   window.__teamsTranscriptCalendarLoaded = true;
 
-  const VERSION = '2.0.1';
+  const VERSION = '2.0.2';
   let actionMap = new Map();
   let lastCalendarScanDebug = { rejectedSlots: [], candidateCount: 0, acceptedCount: 0 };
 
@@ -47,6 +47,111 @@
     /\b(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\b/,
     /\b(\d{1,2})[-/.](\d{1,2})[-/.](20\d{2})\b/
   ];
+  const monthNames = {
+    january: 1, february: 2, march: 3, april: 4, may: 5, june: 6,
+    july: 7, august: 8, september: 9, october: 10, november: 11, december: 12,
+    январь: 1, февраля: 2, март: 3, апреля: 4, май: 5, июня: 6,
+    июля: 7, август: 8, сентября: 9, октябрь: 10, ноября: 11, декабрь: 12
+  };
+
+  function monthNumber(value) {
+    return monthNames[String(value || '').toLowerCase()] || 0;
+  }
+
+  function currentCalendarMonthYear() {
+    const body = normalize(document.body?.innerText || '').slice(0, 5000);
+    const names = Object.keys(monthNames).sort((a, b) => b.length - a.length).join('|');
+    const re = new RegExp('\\b(' + names + ')\\s+(20\\d{2})\\b', 'i');
+    const m = body.match(re);
+    return m ? { month: monthNumber(m[1]), year: Number(m[2]) } : null;
+  }
+
+  function parseNamedDate(text, fallbackYear) {
+    const value = normalize(text);
+    const names = Object.keys(monthNames).sort((a, b) => b.length - a.length).join('|');
+    const re = new RegExp('\\b(\\d{1,2})\\s+(' + names + ')(?:\\s+(20\\d{2}))?\\b', 'i');
+    const m = value.match(re);
+    if (!m) return null;
+    return {
+      day: Number(m[1]),
+      month: monthNumber(m[2]),
+      year: Number(m[3] || fallbackYear || 0)
+    };
+  }
+
+  function parseStartTime(text) {
+    const value = normalize(text);
+    let m = value.match(/\b([01]?\d|2[0-3]):([0-5]\d)\b/);
+    if (m) return { hour: Number(m[1]), minute: Number(m[2]) };
+
+    m = value.match(/\b(1[0-2]|0?[1-9]):([0-5]\d)\s*(AM|PM)\b/i);
+    if (!m) return null;
+
+    let hour = Number(m[1]);
+    const minute = Number(m[2]);
+    const ap = m[3].toUpperCase();
+    if (ap === 'AM' && hour === 12) hour = 0;
+    if (ap === 'PM' && hour !== 12) hour += 12;
+    return { hour, minute };
+  }
+
+  function isNonMeetingControl(text) {
+    const value = normalize(text);
+    if (!value) return true;
+
+    return /^(?:join with an id|new meeting|meet now|calendar(?:\s*\([^)]*\))?|today|work week|week|day|month|previous|next)$/i.test(value)
+      || /^schedule a new meeting\b/i.test(value)
+      || /^use alt\+down to schedule different types of events\.?$/i.test(value)
+      || /^schedule a new meeting,?\s*use alt\+down to schedule different types of events\.?$/i.test(value)
+      || /^calendar\s*\(ctrl\+shift\+6\)$/i.test(value);
+  }
+
+  function getVisibleDayColumns() {
+    const context = currentCalendarMonthYear();
+    if (!context) return [];
+
+    const candidates = [];
+    for (const el of document.querySelectorAll('body *')) {
+      if (!isRendered(el)) continue;
+      const text = normalize(el.innerText || el.textContent || '');
+      if (!/^\d{1,2}\s+(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)$/i.test(text)) continue;
+      const day = Number(text.match(/^\d{1,2}/)?.[0] || 0);
+      if (!day) continue;
+      const r = el.getBoundingClientRect();
+      candidates.push({
+        day,
+        month: context.month,
+        year: context.year,
+        centerX: r.left + r.width / 2,
+        left: r.left,
+        right: r.right
+      });
+    }
+    return candidates;
+  }
+
+  function inferDateFromColumn(rect, dayColumns) {
+    if (!dayColumns.length) return null;
+    const centerX = rect.left + rect.width / 2;
+    const containing = dayColumns.find(d => centerX >= d.left - 8 && centerX <= d.right + 8);
+    if (containing) return containing;
+    return [...dayColumns].sort((a, b) => Math.abs(a.centerX - centerX) - Math.abs(b.centerX - centerX))[0] || null;
+  }
+
+  function toDateStamp(parts) {
+    if (!parts?.year || !parts?.month || !parts?.day) return '';
+    return `${parts.year}${String(parts.month).padStart(2, '0')}${String(parts.day).padStart(2, '0')}`;
+  }
+
+  function toSortKey(dateParts, timeParts, fallbackIndex) {
+    const y = dateParts?.year || 9999;
+    const m = dateParts?.month || 12;
+    const d = dateParts?.day || 31;
+    const hh = timeParts?.hour ?? 23;
+    const mm = timeParts?.minute ?? 59;
+    return y * 100000000 + m * 1000000 + d * 10000 + hh * 100 + mm + (fallbackIndex || 0) / 100000;
+  }
+
 
   function dateStampFromText(text) {
     let m = String(text || '').match(dateRegexes[0]);
@@ -81,7 +186,7 @@
       el.getAttribute('aria-label')
     ].filter(Boolean).join(' '));
     const lower = `${attr} ${text}`.toLowerCase();
-    if (isCalendarAggregateSlot(text)) return -1000;
+    if (isCalendarAggregateSlot(text) || isNonMeetingControl(text)) return -1000;
     let score = 0;
 
     if (/calendar|event|appointment|meeting/.test(lower)) score += 80;
@@ -129,7 +234,7 @@
       if (!isRendered(el)) continue;
       const text = accessibleText(el);
 
-      if (isCalendarAggregateSlot(text)) {
+      if (isCalendarAggregateSlot(text) || isNonMeetingControl(text)) {
         if (rejectedSlots.length < 80) {
           rejectedSlots.push({
             text: text.slice(0, 300),
@@ -150,6 +255,8 @@
       const r = el.getBoundingClientRect();
       raw.push({ el, text, score, r });
     }
+
+    const dayColumns = getVisibleDayColumns();
 
     raw.sort((a, b) => a.r.top - b.r.top || a.r.left - b.r.left || b.score - a.score);
 
@@ -172,13 +279,27 @@
       const id = hash(`${label}|${ordinal}`);
       const href = item.el.href || item.el.closest('a[href]')?.href || '';
       const parentText = normalize(item.el.parentElement?.innerText || '').slice(0, 700);
-      const dateStamp = dateStampFromText(`${label} ${parentText}`);
+      const calendarContext = currentCalendarMonthYear();
+      const explicitDate = parseNamedDate(`${label} ${parentText}`, calendarContext?.year)
+        || (() => {
+          const stamp = dateStampFromText(`${label} ${parentText}`);
+          if (!stamp) return null;
+          return { year: Number(stamp.slice(0, 4)), month: Number(stamp.slice(4, 6)), day: Number(stamp.slice(6, 8)) };
+        })();
+      const inferredDate = explicitDate || inferDateFromColumn(item.r, dayColumns);
+      const startTime = parseStartTime(`${label} ${parentText}`);
+      const dateStamp = toDateStamp(inferredDate);
+      const startTimeText = startTime
+        ? `${String(startTime.hour).padStart(2, '0')}:${String(startTime.minute).padStart(2, '0')}`
+        : '';
 
       meetings.push({
         id,
         label,
         title: cleanMeetingTitle(label),
         dateStamp,
+        startTime: startTimeText,
+        sortKey: toSortKey(inferredDate, startTime, meetings.length),
         href,
         ordinal,
         score: item.score,
@@ -200,6 +321,7 @@
       seenBoxes.push(item.r);
     }
 
+    meetings.sort((a, b) => a.sortKey - b.sortKey || a.title.localeCompare(b.title, 'ru'));
     const result = meetings.slice(0, 120);
     lastCalendarScanDebug = {
       rejectedSlots,
@@ -315,7 +437,7 @@
       '',
       `Meetings found: ${meetings.length}`
     ];
-    meetings.forEach((m, i) => lines.push(`[M${i + 1}] id=${m.id} score=${m.score} date=${m.dateStamp || '-'} rect=${JSON.stringify(m.rect)} dom=${JSON.stringify(m.dom || {})} label=${m.label}`));
+    meetings.forEach((m, i) => lines.push(`[M${i + 1}] id=${m.id} score=${m.score} date=${m.dateStamp || '-'} time=${m.startTime || '-'} rect=${JSON.stringify(m.rect)} dom=${JSON.stringify(m.dom || {})} label=${m.label}`));
     lines.push(
       '',
       `Calendar scan: candidates=${lastCalendarScanDebug.candidateCount || 0}, accepted=${lastCalendarScanDebug.acceptedCount || 0}, rejectedSlots=${(lastCalendarScanDebug.rejectedSlots || []).length}`

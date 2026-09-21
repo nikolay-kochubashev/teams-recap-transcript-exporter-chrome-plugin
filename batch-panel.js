@@ -178,7 +178,20 @@
       lines.push(`${String(item.status || '').toUpperCase()}  ${item.title || item.meetingId}${item.message ? ` - ${item.message}` : ''}`);
       for (const file of item.files || []) lines.push(`      ${file.fileName || file.path}`);
     }
+    const ops = (state?.operationLog || []).slice(-80);
+    if (ops.length) {
+      lines.push('', '--- Operations ---');
+      for (const op of ops) {
+        const time = op.ts ? op.ts.substring(11, 19) : '';
+        const details = { ...op };
+        delete details.ts;
+        delete details.level;
+        delete details.step;
+        lines.push(`${time} ${op.level || 'INFO'} ${op.step || ''} ${JSON.stringify(details)}`);
+      }
+    }
     batchLogEl.textContent = lines.join('\n');
+    batchLogEl.scrollTop = batchLogEl.scrollHeight;
   }
 
   function renderBatchState(state) {

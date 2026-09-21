@@ -2,7 +2,7 @@
   if (window.__teamsTranscriptCalendarLoaded) return;
   window.__teamsTranscriptCalendarLoaded = true;
 
-  const VERSION = '2.0.2';
+  const VERSION = '2.0.4';
   let actionMap = new Map();
   let lastCalendarScanDebug = { rejectedSlots: [], candidateCount: 0, acceptedCount: 0 };
 
@@ -347,13 +347,44 @@
   async function openCalendarMeeting(id) {
     const el = findMeetingElementById(id);
     if (!el) return { ok: false, error: 'Meeting element not found in current calendar view.' };
-    try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (_) {}
+
+    const target = el.matches('button,a,[role="button"],[role="link"],[tabindex]')
+      ? el
+      : (el.closest('button,a,[role="button"],[role="link"],[tabindex]') || el);
+
+    try { target.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (_) {}
     await sleep(120);
-    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
-    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
-    el.click();
-    await sleep(550);
-    return { ok: true };
+
+    try { target.focus({ preventScroll: true }); } catch (_) {}
+
+    for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+      try {
+        const EventCtor = type.startsWith('pointer') && window.PointerEvent ? PointerEvent : MouseEvent;
+        target.dispatchEvent(new EventCtor(type, {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+          button: 0,
+          buttons: type.endsWith('down') ? 1 : 0
+        }));
+      } catch (_) {}
+    }
+
+    try { target.click(); } catch (_) {}
+    await sleep(700);
+
+    return {
+      ok: true,
+      url: location.href,
+      target: {
+        tag: target.tagName,
+        role: target.getAttribute('role') || '',
+        dataTid: target.getAttribute('data-tid') || '',
+        dataTestId: target.getAttribute('data-testid') || '',
+        ariaLabel: target.getAttribute('aria-label') || '',
+        text: accessibleText(target).slice(0, 500)
+      }
+    };
   }
 
   function classifyAction(label, href) {

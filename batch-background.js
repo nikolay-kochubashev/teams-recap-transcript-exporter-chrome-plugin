@@ -367,6 +367,27 @@ async function discoverRecordingUrls(tempTabId) {
   return [...new Set(urls)];
 }
 
+async function ensureCalendarMeetingVisible(tabId, meetingId) {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    try {
+      const response = await sendTab(tabId, { type: 'CALENDAR_SCAN' }, 3500);
+      if (response?.ok && (response.meetings || []).some(m => m.id === meetingId)) {
+        return true;
+      }
+    } catch (_) {}
+
+    try {
+      await appendOperation('CALENDAR_RESTORE_BACK', { tabId, meetingId, attempt: attempt + 1 });
+      await chrome.tabs.goBack(tabId);
+      await waitTabComplete(tabId, 15000);
+      await delay(700);
+    } catch (_) {
+      break;
+    }
+  }
+  return false;
+}
+
 async function processMeeting(meeting, index) {
   await appendOperation('MEETING_START', {
     meetingId: meeting.id,
@@ -376,6 +397,7 @@ async function processMeeting(meeting, index) {
     dom: meeting.dom || {},
     rect: meeting.rect || {}
   });
+
   await logMeeting(meeting.id, {
     status: 'running',
     message: 'Открываю встречу...',
@@ -387,39 +409,47 @@ async function processMeeting(meeting, index) {
     message: `Обрабатываю ${index + 1}/${batchState.selectedIds.length}: ${meeting.title || meeting.label}`
   });
 
-  let tempTabId = null;
+  const calendarTabId = batchState.calendarTabId;
 
   try {
-    const duplicate = await chrome.tabs.duplicate(batchState.calendarTabId);
-    tempTabId = duplicate.id;
-    await appendOperation('CALENDAR_TAB_DUPLICATED', {
-      meetingId: meeting.id,
-      sourceTabId: batchState.calendarTabId,
-      tempTabId
-    });
-
-    await chrome.tabs.update(tempTabId, { active: false });
-    await waitTabComplete(tempTabId, 30000);
-    await delay(900);
+    const available = await ensureCalendarMeetingVisible(calendarTabId, meeting.id);
+    if (!available) {
+      await appendOperation('MEETING_NOT_VISIBLE_IN_CALENDAR', {
+        meetingId: meeting.id,
+        calendarTabId
+      }, 'ERROR');
+      throw new Error('Встреча не найдена в исходной вкладке календаря. Не меняй отображаемую неделю во время пакетного сбора.');
+    }
 
     const opened = await sendTab(
-      tempTabId,
+      calendarTabId,
       { type: 'CALENDAR_OPEN_MEETING', id: meeting.id },
       12000
     );
 
     if (!opened?.ok) {
-      await appendOperation('OPEN_MEETING_FAILED', { meetingId: meeting.id, tempTabId, error: opened?.error || '' }, 'ERROR');
+      await appendOperation('OPEN_MEETING_FAILED', {
+        meetingId: meeting.id,
+        calendarTabId,
+        error: opened?.error || ''
+      }, 'ERROR');
       throw new Error(opened?.error || 'Не удалось открыть карточку встречи в календаре.');
     }
 
-    await appendOperation('OPEN_MEETING_OK', { meetingId: meeting.id, tempTabId });
-    await delay(800);
+    await appendOperation('OPEN_MEETING_OK', {
+      meetingId: meeting.id,
+      calendarTabId,
+      url: opened.url || '',
+      target: opened.target || {}
+    });
 
-    const urls = await discoverRecordingUrls(tempTabId);
+    await delay(900);
+
+    const urls = await discoverRecordingUrls(calendarTabId);
+
     await appendOperation('RECORDING_URLS_RESULT', {
       meetingId: meeting.id,
-      tempTabId,
+      calendarTabId,
       count: urls.length,
       urls
     });
@@ -429,6 +459,7 @@ async function processMeeting(meeting, index) {
         meetingId: meeting.id,
         reason: 'Запись/Recap не найдены.'
       }, 'WARN');
+
       await logMeeting(meeting.id, {
         status: 'skip',
         message: 'Запись/Recap не найдены.',
@@ -442,19 +473,22 @@ async function processMeeting(meeting, index) {
     for (let i = 0; i < urls.length; i++) {
       if (stopRequested) throw new Error('Остановлено пользователем.');
 
-      const currentTab = await chrome.tabs.get(tempTabId);
-      const reuse = isRecordingUrl(currentTab.url) && currentTab.url === urls[i]
-        ? tempTabId
-        : null;
-
-      const file = await processRecordingUrl(urls[i], meeting, i, reuse);
+      // Recording is always processed in its own background tab.
+      // The original Teams Calendar tab remains the navigation/state anchor.
+      const file = await processRecordingUrl(urls[i], meeting, i, null);
       files.push(file);
     }
 
     await appendOperation('MEETING_DONE', {
       meetingId: meeting.id,
-      files: files.map(f => ({ fileName: f.fileName, path: f.path, chars: f.chars, items: f.items }))
+      files: files.map(f => ({
+        fileName: f.fileName,
+        path: f.path,
+        chars: f.chars,
+        items: f.items
+      }))
     });
+
     await logMeeting(meeting.id, {
       status: 'done',
       message: `Сохранено файлов: ${files.length}.`,
@@ -467,15 +501,19 @@ async function processMeeting(meeting, index) {
       meetingId: meeting.id,
       error: e?.message || String(e)
     }, 'ERROR');
+
     await logMeeting(meeting.id, {
       status: 'error',
       message: e?.message || String(e),
       files: []
     });
   } finally {
-    if (tempTabId) {
-      try { await chrome.tabs.remove(tempTabId); } catch (_) {}
-    }
+    const restored = await ensureCalendarMeetingVisible(calendarTabId, meeting.id);
+    await appendOperation('CALENDAR_RESTORE_RESULT', {
+      meetingId: meeting.id,
+      calendarTabId,
+      restored
+    }, restored ? 'INFO' : 'WARN');
   }
 }
 

@@ -93,6 +93,86 @@ async function sendTab(tabId, message, timeoutMs = 12000) {
   throw new Error(lastError?.message || 'Страница не ответила расширению.');
 }
 
+async function sendFrame(tabId, frameId, message, timeoutMs = 12000) {
+  const started = Date.now();
+  let lastError = null;
+  while (Date.now() - started < timeoutMs) {
+    try {
+      return await chrome.tabs.sendMessage(tabId, message, { frameId });
+    } catch (e) {
+      lastError = e;
+      await delay(250);
+    }
+  }
+  throw new Error(lastError?.message || `Frame ${frameId} did not answer extension.`);
+}
+
+async function probeTranscriptFrames(tabId, timeoutMs = 9000) {
+  const started = Date.now();
+  let last = { selected: null, frames: [] };
+
+  while (Date.now() - started < timeoutMs) {
+    let frames = [];
+    try {
+      frames = await chrome.webNavigation.getAllFrames({ tabId }) || [];
+    } catch (_) {
+      frames = [{ frameId: 0, url: (await chrome.tabs.get(tabId)).url || '' }];
+    }
+
+    const results = [];
+    for (const frame of frames) {
+      try {
+        const probe = await sendFrame(tabId, frame.frameId, { type: 'PROBE_TRANSCRIPT' }, 1800);
+        results.push({
+          frameId: frame.frameId,
+          parentFrameId: frame.parentFrameId ?? -1,
+          frameUrl: frame.url || '',
+          ...probe
+        });
+      } catch (_) {}
+    }
+
+    results.sort((a, b) => {
+      const as = a.best ? (a.best.strong ? 10000 : 0) + (a.best.score || 0) : (a.transcriptVisible ? 100 : 0);
+      const bs = b.best ? (b.best.strong ? 10000 : 0) + (b.best.score || 0) : (b.transcriptVisible ? 100 : 0);
+      return bs - as;
+    });
+
+    const selected = results.find(x =>
+      x.best && (x.best.strong || (x.best.score || 0) >= 45)
+    ) || null;
+
+    last = { selected, frames: results };
+    if (selected) return last;
+    await delay(350);
+  }
+
+  return last;
+}
+
+async function collectFrameDiagnostics(tabId) {
+  let frames = [];
+  try {
+    frames = await chrome.webNavigation.getAllFrames({ tabId }) || [];
+  } catch (_) {
+    frames = [{ frameId: 0, url: (await chrome.tabs.get(tabId)).url || '' }];
+  }
+
+  const out = [];
+  for (const frame of frames) {
+    try {
+      const debug = await sendFrame(tabId, frame.frameId, { type: 'GET_DEBUG' }, 2200);
+      out.push({
+        frameId: frame.frameId,
+        parentFrameId: frame.parentFrameId ?? -1,
+        frameUrl: frame.url || '',
+        debug: String(debug?.text || '').slice(0, 12000)
+      });
+    } catch (_) {}
+  }
+  return out;
+}
+
 async function waitTabComplete(tabId, timeoutMs = 30000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
@@ -267,12 +347,33 @@ async function waitForRecapCards(tabId, dateStamp, timeoutMs = 12000) {
   return dateStamp ? last.filter(x => x.dateStamp === dateStamp) : last;
 }
 
-async function extractRecordingFromTab(tabId, meeting, recordingUrl, recordingIndex) {
+async function extractRecordingFromTab(tabId, meeting, recordingUrl, recordingIndex, preferredFrameId = null) {
   await patchBatch({
     message: `Собираю транскрипцию: ${meeting.title || meeting.label}`
   });
 
-  await sendTab(tabId, { type: 'START_EXTRACT' }, 20000);
+  let frameId = preferredFrameId;
+  if (frameId === null || frameId === undefined) {
+    const probe = await probeTranscriptFrames(tabId, 6000);
+    frameId = probe.selected?.frameId ?? 0;
+
+    await appendOperation('TRANSCRIPT_FRAME_LOOKUP', {
+      meetingId: meeting.id,
+      selectedFrameId: frameId,
+      frames: probe.frames.slice(0, 12).map(x => ({
+        frameId: x.frameId,
+        parentFrameId: x.parentFrameId,
+        frameUrl: x.frameUrl,
+        url: x.url || '',
+        title: x.title || '',
+        isTop: !!x.isTop,
+        transcriptVisible: !!x.transcriptVisible,
+        best: x.best || null
+      }))
+    }, probe.selected ? 'INFO' : 'WARN');
+  }
+
+  await sendFrame(tabId, frameId, { type: 'START_EXTRACT' }, 20000);
 
   const started = Date.now();
   let state = null;
@@ -280,7 +381,7 @@ async function extractRecordingFromTab(tabId, meeting, recordingUrl, recordingIn
   while (Date.now() - started < 12 * 60 * 1000) {
     if (stopRequested) throw new Error('Остановлено пользователем.');
 
-    const response = await sendTab(tabId, { type: 'GET_STATE' }, 5000);
+    const response = await sendFrame(tabId, frameId, { type: 'GET_STATE' }, 5000);
     state = response?.state;
 
     if (state?.status === 'done') break;
@@ -318,6 +419,7 @@ async function extractRecordingFromTab(tabId, meeting, recordingUrl, recordingIn
     meetingId: meeting.id,
     recordingUrl,
     recordingIndex,
+    frameId,
     fileName,
     path: saved.path,
     chars: state.text.length,
@@ -328,7 +430,8 @@ async function extractRecordingFromTab(tabId, meeting, recordingUrl, recordingIn
     path: saved.path,
     fileName,
     chars: state.text.length,
-    items: state.items || 0
+    items: state.items || 0,
+    frameId
   };
 }
 
@@ -497,16 +600,48 @@ async function tryExtractTranscriptFromMeetingDetails(tabId, meeting) {
       await sendTab(tabId, { type: 'CLEAR_RESULT' }, 3000);
     } catch (_) {}
 
+    const probe = await probeTranscriptFrames(tabId, 10000);
+
+    await appendOperation('DETAILS_TRANSCRIPT_FRAME_LOOKUP', {
+      meetingId: meeting.id,
+      selectedFrameId: probe.selected?.frameId ?? null,
+      frames: probe.frames.slice(0, 12).map(x => ({
+        frameId: x.frameId,
+        parentFrameId: x.parentFrameId,
+        frameUrl: x.frameUrl,
+        url: x.url || '',
+        title: x.title || '',
+        isTop: !!x.isTop,
+        transcriptVisible: !!x.transcriptVisible,
+        best: x.best || null
+      }))
+    }, probe.selected ? 'INFO' : 'WARN');
+
+    if (!probe.selected) {
+      const diagnostics = await collectFrameDiagnostics(tabId);
+      await appendOperation('DETAILS_TRANSCRIPT_FRAME_DIAGNOSTIC', {
+        meetingId: meeting.id,
+        diagnostics
+      }, 'WARN');
+      throw new Error('Transcript открыт, но область транскрипции не найдена ни в одном frame.');
+    }
+
+    try {
+      await sendFrame(tabId, probe.selected.frameId, { type: 'CLEAR_RESULT' }, 3000);
+    } catch (_) {}
+
     const tab = await chrome.tabs.get(tabId);
     const file = await extractRecordingFromTab(
       tabId,
       meeting,
       tab.url || 'https://teams.microsoft.com/v2/',
-      0
+      0,
+      probe.selected.frameId
     );
 
     await appendOperation('DETAILS_TRANSCRIPT_EXTRACT_OK', {
       meetingId: meeting.id,
+      frameId: probe.selected.frameId,
       fileName: file?.fileName || '',
       path: file?.path || '',
       chars: file?.chars || 0,
@@ -515,9 +650,13 @@ async function tryExtractTranscriptFromMeetingDetails(tabId, meeting) {
 
     return file;
   } catch (e) {
+    let diagnostics = [];
+    try { diagnostics = await collectFrameDiagnostics(tabId); } catch (_) {}
+
     await appendOperation('DETAILS_TRANSCRIPT_EXTRACT_FAILED', {
       meetingId: meeting.id,
-      error: e?.message || String(e)
+      error: e?.message || String(e),
+      diagnostics
     }, 'WARN');
     return null;
   }

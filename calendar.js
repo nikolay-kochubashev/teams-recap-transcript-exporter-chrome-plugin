@@ -163,9 +163,19 @@
     let s = normalize(text);
     if (!s) return '';
 
-    // Cut the accessibility suffix beginning with either:
-    // "14 September 2026 ..." or "Monday, September 14, 2026 ...".
-    const dayFirstTail = new RegExp(',?\\s*\\d{1,2}\\s+(?:' + monthPattern + ')\\s+20\\d{2}\\b.*
+    const dayFirstTail = /,?\s*\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December|января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\s+20\d{2}\b.*$/i;
+    const monthFirstTail = /,?\s*(?:(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s*)?(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+20\d{2}\b.*$/i;
+
+    s = s.replace(dayFirstTail, '');
+    s = s.replace(monthFirstTail, '');
+    s = s.replace(/,?\s*location\s*:\s*.*$/i, '');
+    s = s.replace(/,?\s*(?:organised|organized) by\b.*$/i, '');
+    s = s.replace(/,?\s*(?:Recurring meeting|Microsoft Teams meeting|Teams meeting).*$/i, '');
+    s = s.replace(/,?\s*Press Shift\+F10 for more options.*$/i, '');
+    s = s.replace(/[\s,;:-]+$/g, '').replace(/\s+/g, ' ').trim();
+
+    return (s || normalize(text)).slice(0, 180);
+  }
 
   function getVisibleDayColumns() {
     const context = currentCalendarMonthYear();

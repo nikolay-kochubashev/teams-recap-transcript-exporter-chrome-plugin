@@ -1,136 +1,101 @@
 importScripts('batch-background.js');
 
-const SIDE_PANEL_PATH = 'panel.html';
-const SIDE_PANEL_TAB_KEY = 'sidePanelBoundTabId';
-
-function isSupportedUrl(url) {
-  try {
-    const u = new URL(url || '');
-    if (u.protocol !== 'https:') return false;
-    const host = u.hostname.toLowerCase();
-    return (
-      host === 'teams.microsoft.com' ||
-      host.endsWith('.teams.microsoft.com') ||
-      host === 'teams.cloud.microsoft' ||
-      host.endsWith('.teams.cloud.microsoft') ||
-      host.endsWith('.sharepoint.com')
-    );
-  } catch (_) {
-    return false;
-  }
-}
-
-async function getBoundTabId() {
-  try {
-    const data = await chrome.storage.session.get(SIDE_PANEL_TAB_KEY);
-    return Number.isInteger(data && data[SIDE_PANEL_TAB_KEY]) ? data[SIDE_PANEL_TAB_KEY] : null;
-  } catch (_) {
-    return null;
-  }
-}
-
-async function setBoundTabId(tabId) {
-  if (Number.isInteger(tabId)) {
-    await chrome.storage.session.set({ [SIDE_PANEL_TAB_KEY]: tabId });
-  } else {
-    await chrome.storage.session.remove(SIDE_PANEL_TAB_KEY);
-  }
-}
-
-async function disablePanelForTab(tabId) {
-  if (!Number.isInteger(tabId)) return;
-  try {
-    await chrome.sidePanel.setOptions({ tabId, enabled: false });
-  } catch (_) {}
-}
-
-async function bindSidePanelToTab(tab) {
-  if (!tab || !tab.id) throw new Error('Не удалось определить вкладку.');
-  if (!isSupportedUrl(tab.url)) {
-    throw new Error('Панель доступна только для Microsoft Teams/SharePoint.');
-  }
-
-  const previousTabId = await getBoundTabId();
-  if (previousTabId !== null && previousTabId !== tab.id) {
-    await disablePanelForTab(previousTabId);
-  }
-
-  await chrome.sidePanel.setOptions({
-    tabId: tab.id,
-    path: SIDE_PANEL_PATH,
-    enabled: true
-  });
-
-  await setBoundTabId(tab.id);
-  await chrome.sidePanel.open({ tabId: tab.id });
-}
+const PANEL_PATH = 'panel.html';
+const OWNER_STORAGE_KEY = 'sidePanelOwnerByWindow';
 
 async function configureSidePanel() {
   try {
+    // The action click is handled explicitly so the panel can be bound to
+    // exactly one tab instead of being inherited by the whole Chrome window.
     await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
     await chrome.sidePanel.setOptions({ enabled: false });
-
-    const boundTabId = await getBoundTabId();
-    if (boundTabId !== null) {
-      try {
-        const tab = await chrome.tabs.get(boundTabId);
-        if (isSupportedUrl(tab.url)) {
-          await chrome.sidePanel.setOptions({
-            tabId: boundTabId,
-            path: SIDE_PANEL_PATH,
-            enabled: true
-          });
-        } else {
-          await setBoundTabId(null);
-        }
-      } catch (_) {
-        await setBoundTabId(null);
-      }
-    }
   } catch (e) {
     console.error('Unable to configure side panel:', e);
   }
 }
 
-chrome.action.onClicked.addListener(async tab => {
+async function getSidePanelOwners() {
   try {
-    await bindSidePanelToTab(tab);
+    const data = await chrome.storage.session.get(OWNER_STORAGE_KEY);
+    return data?.[OWNER_STORAGE_KEY] || {};
+  } catch (_) {
+    return {};
+  }
+}
+
+async function saveSidePanelOwners(owners) {
+  try {
+    await chrome.storage.session.set({ [OWNER_STORAGE_KEY]: owners });
   } catch (e) {
-    console.error('Unable to open tab-specific side panel:', e);
+    console.warn('Unable to persist side panel owner state:', e);
   }
-});
+}
 
-chrome.tabs.onRemoved.addListener(async tabId => {
-  const boundTabId = await getBoundTabId();
-  if (boundTabId === tabId) await setBoundTabId(null);
-});
+async function bindSidePanelToTab(tab) {
+  if (!tab?.id || !tab?.windowId) return;
 
-chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
-  if (!changeInfo.url) return;
-  const boundTabId = await getBoundTabId();
-  if (boundTabId !== tabId) return;
-  if (!isSupportedUrl(tab.url)) {
-    await disablePanelForTab(tabId);
-    await setBoundTabId(null);
-  }
-});
+  const owners = await getSidePanelOwners();
+  const windowKey = String(tab.windowId);
+  const previousTabId = Number(owners[windowKey] || 0);
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message && message.type === 'SIDE_PANEL_GET_BOUND_TAB') {
-    (async () => {
-      const tabId = await getBoundTabId();
-      let tab = null;
-      if (tabId !== null) {
-        try { tab = await chrome.tabs.get(tabId); } catch (_) {}
-      }
-      sendResponse({
-        ok: true,
-        tabId,
-        tab: tab ? { id: tab.id, windowId: tab.windowId, url: tab.url || '', title: tab.title || '' } : null
+  if (previousTabId && previousTabId !== tab.id) {
+    try {
+      await chrome.sidePanel.setOptions({
+        tabId: previousTabId,
+        enabled: false
       });
-    })();
-    return true;
+    } catch (_) {
+      // The previous tab may already be closed.
+    }
   }
+
+  await chrome.sidePanel.setOptions({
+    tabId: tab.id,
+    path: PANEL_PATH,
+    enabled: true
+  });
+
+  owners[windowKey] = tab.id;
+  await saveSidePanelOwners(owners);
+
+  await chrome.sidePanel.open({ tabId: tab.id });
+}
+
+async function forgetSidePanelOwnerForTab(tabId) {
+  const owners = await getSidePanelOwners();
+  let changed = false;
+
+  for (const [windowKey, ownerTabId] of Object.entries(owners)) {
+    if (Number(ownerTabId) === tabId) {
+      delete owners[windowKey];
+      changed = true;
+    }
+  }
+
+  if (changed) await saveSidePanelOwners(owners);
+}
+
+async function forgetSidePanelOwnerForWindow(windowId) {
+  const owners = await getSidePanelOwners();
+  const windowKey = String(windowId);
+  if (!(windowKey in owners)) return;
+
+  delete owners[windowKey];
+  await saveSidePanelOwners(owners);
+}
+
+chrome.action.onClicked.addListener(tab => {
+  bindSidePanelToTab(tab).catch(e => {
+    console.error('Unable to open tab-scoped side panel:', e);
+  });
+});
+
+chrome.tabs.onRemoved.addListener(tabId => {
+  forgetSidePanelOwnerForTab(tabId).catch(() => {});
+});
+
+chrome.windows.onRemoved.addListener(windowId => {
+  forgetSidePanelOwnerForWindow(windowId).catch(() => {});
 });
 
 chrome.runtime.onInstalled.addListener(configureSidePanel);

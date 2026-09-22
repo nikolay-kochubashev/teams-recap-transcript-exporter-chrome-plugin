@@ -571,7 +571,7 @@
 
   function classifyMeetingScopedAction(label, href) {
     const value = normalize(label);
-    const lower = \`\${value} \${href || ''}\`.toLowerCase();
+    const lower = `${value} ${href || ''}`.toLowerCase();
 
     if (/view\s+recap|open\s+recap|meeting\s+recap/i.test(value)) return 'recap';
     if (/watch\s+recording|open\s+recording|meeting\s+recording|recorded/i.test(value) || /stream\.aspx|\.mp4(?:\?|$)/i.test(href || '')) return 'recording';
@@ -600,7 +600,7 @@
       const kind = classifyMeetingScopedAction(label, href);
       if (!kind) continue;
 
-      const id = \`meeting-\${++seq}-\${hash(\`\${kind}|\${label}|\${href}\`)}\`;
+      const id = `meeting-${++seq}-${hash(`${kind}|${label}|${href}`)}`;
       actionMap.set(id, el);
       result.push({
         id,

@@ -2,7 +2,7 @@
   if (window.__teamsTranscriptCalendarLoaded) return;
   window.__teamsTranscriptCalendarLoaded = true;
 
-  const VERSION = '2.0.16';
+  const VERSION = '2.0.17';
   let actionMap = new Map();
   let lastCalendarScanDebug = { rejected: [], candidates: [], acceptedCount: 0 };
 
@@ -402,24 +402,24 @@
       /^(?:details|recap|recording|transcript|close)$/i.test(text)
     );
 
-    if (hasDetailsSignals) return true;
-
-    // New Teams can navigate from a Calendar card to a full meeting page without
-    // rendering a control literally called "Details". The strongest signal is:
-    // the selected meeting title is now the page title, and visible Calendar cards
-    // disappeared. This also avoids accepting the stale browser title after we
-    // navigate back to Calendar.
     const hasVisibleCalendarCards = Array.from(document.querySelectorAll(
       '[data-testid="calendar-in-day-event-card"]'
     )).some(isRendered);
 
+    // Never accept a stale previous meeting merely because the requested title
+    // is somewhere in the left chat list/body. The document title is the most
+    // stable identity signal in this Teams build.
     if (titleMatches && !hasVisibleCalendarCards) return true;
 
-    const hasMeetingSignals = controls.some(text =>
-      /^(?:join|show join info|meeting info|meeting options|attendance|chat)$/i.test(text)
-    );
+    const headingMatches = Array.from(document.querySelectorAll(
+      'h1,h2,h3,[role="heading"]'
+    ))
+      .filter(isRendered)
+      .some(el => normalizedComparable(el.innerText || el.textContent || '').includes(expected));
 
-    return !hasVisibleCalendarCards && bodyMatches && hasMeetingSignals;
+    if (headingMatches && !hasVisibleCalendarCards && hasDetailsSignals) return true;
+
+    return false;
   }
 
   function clickableAncestor(el, maxDepth = 6) {

@@ -2,7 +2,7 @@
   if (window.__teamsTranscriptCalendarLoaded) return;
   window.__teamsTranscriptCalendarLoaded = true;
 
-  const VERSION = '2.0.9';
+  const VERSION = '2.0.12';
   let actionMap = new Map();
   let lastCalendarScanDebug = { rejected: [], candidates: [], acceptedCount: 0 };
 
@@ -239,64 +239,28 @@
   }
 
   function scanCalendarMeetings() {
-    const pool = Array.from(document.querySelectorAll([
-      '[data-tid*="calendar"]',
-      '[data-tid*="event"]',
-      '[data-testid*="calendar"]',
-      '[data-testid*="event"]',
-      '[role="gridcell"]',
-      '[role="button"]',
-      'button',
-      'a[href]'
-    ].join(',')));
+    const cards = Array.from(
+      document.querySelectorAll('[data-testid="calendar-in-day-event-card"]')
+    ).filter(isRendered);
 
-    const raw = [];
-    const rejected = [];
+    const calendarContext = currentCalendarMonthYear();
+    const meetings = [];
     const debugCandidates = [];
 
-    for (const el of pool) {
-      if (!isRendered(el)) continue;
-      const text = accessibleText(el);
-      const score = meetingCandidateScore(el, text);
+    for (const el of cards) {
+      const label = normalize(el.getAttribute('aria-label') || accessibleText(el));
+      if (!label) continue;
 
-      const dom = {
-        tag: el.tagName,
-        role: el.getAttribute('role') || '',
-        dataTid: el.getAttribute('data-tid') || '',
-        dataTestId: el.getAttribute('data-testid') || '',
-        ariaLabel: (el.getAttribute('aria-label') || '').slice(0, 500),
-        className: typeof el.className === 'string' ? el.className.slice(0, 300) : ''
-      };
-
-      if (score < 55) {
-        if ((isCalendarAggregateSlot(text) || isNonMeetingControl(text)) && rejected.length < 80) {
-          rejected.push({ text: text.slice(0, 350), score, dom });
-        }
-        continue;
-      }
-
-      const r = el.getBoundingClientRect();
-      raw.push({ el, text, score, r, dom });
-      if (debugCandidates.length < 80) debugCandidates.push({ text: text.slice(0, 500), score, dom });
-    }
-
-    const dayColumns = getVisibleDayColumns();
-    const calendarContext = currentCalendarMonthYear();
-    const byId = new Map();
-
-    for (const item of raw) {
-      const label = item.text;
-      const parentText = normalize(item.el.parentElement?.innerText || '').slice(0, 1000);
-      const explicitDate = parseFlexibleDate(`${label} ${parentText}`, calendarContext?.year);
-      const inferredDate = explicitDate || inferDateFromColumn(item.r, dayColumns);
-      const startTime = parseStartTime(`${label} ${parentText}`);
-      const dateStamp = toDateStamp(inferredDate);
+      const date = parseFlexibleDate(label, calendarContext?.year);
+      const startTime = parseStartTime(label);
+      const dateStamp = toDateStamp(date);
       const startTimeText = startTime
         ? `${String(startTime.hour).padStart(2, '0')}:${String(startTime.minute).padStart(2, '0')}`
         : '';
       const title = cleanMeetingTitle(label);
-      const id = hash(`${normalize(label)}|${dateStamp}|${startTimeText}`);
-      const href = item.el.href || item.el.closest('a[href]')?.href || '';
+      const r = el.getBoundingClientRect();
+      const elementId = el.id || '';
+      const id = elementId || hash(`${label}|${dateStamp}|${startTimeText}`);
 
       const meeting = {
         id,
@@ -304,98 +268,147 @@
         title,
         dateStamp,
         startTime: startTimeText,
-        sortKey: toSortKey(inferredDate, startTime, byId.size),
-        href,
-        score: item.score,
-        dom: item.dom,
+        sortKey: toSortKey(date, startTime, meetings.length),
+        href: '',
+        score: 1000,
+        dom: {
+          adapter: 'calendar-in-day-event-card',
+          elementId,
+          dataTestId: 'calendar-in-day-event-card',
+          ariaLabel: label
+        },
         rect: {
-          top: Math.round(item.r.top),
-          left: Math.round(item.r.left),
-          width: Math.round(item.r.width),
-          height: Math.round(item.r.height)
+          top: Math.round(r.top),
+          left: Math.round(r.left),
+          width: Math.round(r.width),
+          height: Math.round(r.height)
         }
       };
 
-      const existing = byId.get(id);
-      if (!existing || meeting.score > existing.score) byId.set(id, meeting);
+      meetings.push(meeting);
+      if (debugCandidates.length < 80) {
+        debugCandidates.push({
+          id,
+          title,
+          dateStamp,
+          startTime: startTimeText,
+          elementId,
+          ariaLabel: label
+        });
+      }
     }
 
-    const meetings = Array.from(byId.values())
-      .sort((a, b) => a.sortKey - b.sortKey || a.title.localeCompare(b.title, 'ru'))
-      .slice(0, 120);
+    meetings.sort((a, b) => a.sortKey - b.sortKey || a.title.localeCompare(b.title, 'ru'));
 
     lastCalendarScanDebug = {
-      rejected,
+      rejected: [],
       candidates: debugCandidates,
       acceptedCount: meetings.length
     };
-    return meetings;
+
+    return meetings.slice(0, 120);
   }
 
   function findMeetingElement(meeting) {
     if (!meeting) return null;
-    const pool = Array.from(document.querySelectorAll([
-      '[data-tid*="calendar"]',
-      '[data-tid*="event"]',
-      '[data-testid*="calendar"]',
-      '[data-testid*="event"]',
-      '[role="gridcell"]',
-      '[role="button"]',
-      'button',
-      'a[href]'
-    ].join(','))).filter(isRendered);
 
-    const exact = pool.filter(el => accessibleText(el) === meeting.label);
-    if (exact.length) {
-      return exact.sort((a, b) => meetingCandidateScore(b, accessibleText(b)) - meetingCandidateScore(a, accessibleText(a)))[0];
+    const byId = meeting.dom?.elementId
+      ? document.getElementById(meeting.dom.elementId)
+      : null;
+
+    if (
+      byId &&
+      byId.matches?.('[data-testid="calendar-in-day-event-card"]') &&
+      isRendered(byId)
+    ) {
+      return byId;
     }
 
-    const title = normalize(meeting.title).toLowerCase();
-    const fallback = pool
-      .map(el => ({ el, text: accessibleText(el), r: el.getBoundingClientRect() }))
-      .filter(x => x.text && normalize(x.text).toLowerCase().startsWith(title))
-      .sort((a, b) => {
-        const ad = Math.abs(a.r.left - (meeting.rect?.left || a.r.left)) + Math.abs(a.r.top - (meeting.rect?.top || a.r.top));
-        const bd = Math.abs(b.r.left - (meeting.rect?.left || b.r.left)) + Math.abs(b.r.top - (meeting.rect?.top || b.r.top));
-        return ad - bd;
-      });
-    return fallback[0]?.el || null;
+    const cards = Array.from(
+      document.querySelectorAll('[data-testid="calendar-in-day-event-card"]')
+    ).filter(isRendered);
+
+    const exact = cards.find(el =>
+      normalize(el.getAttribute('aria-label') || '') === normalize(meeting.label)
+    );
+    if (exact) return exact;
+
+    const expectedTitle = normalizedComparable(meeting.title);
+    return cards.find(el => {
+      const label = normalize(el.getAttribute('aria-label') || '');
+      const title = normalizedComparable(cleanMeetingTitle(label));
+      const dateStamp = toDateStamp(parseFlexibleDate(label, currentCalendarMonthYear()?.year));
+      return title === expectedTitle && dateStamp === meeting.dateStamp;
+    }) || null;
   }
 
   async function openCalendarMeeting(meeting) {
     const el = findMeetingElement(meeting);
     if (!el) {
-      return { ok: false, error: 'Meeting element not found in current calendar view.' };
+      return { ok: false, error: 'Meeting card not found in current Calendar view.' };
     }
 
-    const target = el.matches('button,a,[role="button"],[role="link"],[tabindex]')
-      ? el
-      : (el.querySelector('button,a,[role="button"],[role="link"],[tabindex]')
-        || el.closest('button,a,[role="button"],[role="link"],[tabindex]')
-        || el);
+    try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (_) {}
+    await sleep(100);
+    try { el.focus({ preventScroll: true }); } catch (_) {}
+    el.click();
+    await sleep(350);
 
-    try { target.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (_) {}
-    await sleep(120);
-    try { target.focus({ preventScroll: true }); } catch (_) {}
-
-    try {
-      target.click();
-    } catch (_) {
-      target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window, button: 0 }));
-    }
-
-    await sleep(1000);
     return {
       ok: true,
       url: location.href,
       target: {
-        tag: target.tagName,
-        role: target.getAttribute('role') || '',
-        dataTid: target.getAttribute('data-tid') || '',
-        dataTestId: target.getAttribute('data-testid') || '',
-        ariaLabel: target.getAttribute('aria-label') || '',
-        text: accessibleText(target).slice(0, 500)
+        tag: el.tagName,
+        dataTestId: el.getAttribute('data-testid') || '',
+        elementId: el.id || '',
+        ariaLabel: el.getAttribute('aria-label') || ''
       }
+    };
+  }
+
+  async function openMeetingChatFromCalendar(meeting) {
+    const opened = await openCalendarMeeting(meeting);
+    if (!opened.ok) return opened;
+
+    const expectedTitle = normalizedComparable(meeting.title);
+
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const dialogs = Array.from(document.querySelectorAll('[role="dialog"]')).filter(isRendered);
+
+      for (const dialog of dialogs) {
+        const dialogText = normalize(dialog.innerText || dialog.textContent || '');
+        if (expectedTitle && !normalizedComparable(dialogText).includes(expectedTitle)) continue;
+
+        const body = dialog.querySelector('[data-tid="peek-body-container"]') || dialog;
+        const buttons = Array.from(body.querySelectorAll('button')).filter(isRendered);
+        const chatButton = buttons.find(btn =>
+          normalize(btn.innerText || btn.textContent || '') === 'Chat with participants'
+        );
+
+        if (!chatButton) continue;
+
+        const popup = {
+          title: meeting.title,
+          text: dialogText.slice(0, 1200),
+          hasPeekBody: !!dialog.querySelector('[data-tid="peek-body-container"]')
+        };
+
+        chatButton.click();
+        await sleep(700);
+
+        return {
+          ok: true,
+          url: location.href,
+          popup
+        };
+      }
+
+      await sleep(150);
+    }
+
+    return {
+      ok: false,
+      error: 'Meeting details popup or "Chat with participants" button not found.'
     };
   }
 
@@ -482,6 +495,101 @@
     }
 
     return { ok: false, error: 'Unable to navigate Calendar to the meeting week.' };
+  }
+
+  function recapCardContext(card) {
+    const message = card.closest('[data-tid="control-message-renderer"]');
+    const headingId = message?.getAttribute('aria-labelledby') || '';
+    const heading = headingId ? document.getElementById(headingId) : null;
+    const headingText = normalize(
+      heading?.innerText ||
+      heading?.textContent ||
+      message?.innerText ||
+      message?.textContent ||
+      card.innerText ||
+      card.textContent ||
+      ''
+    );
+
+    return { message, heading, headingText };
+  }
+
+  function findMeetingRecap(meeting) {
+    actionMap = new Map();
+
+    const cards = Array.from(document.querySelectorAll(
+      '[data-testid="meeting-recap-object"], [data-testid="meeting-recap-chiclet"]'
+    )).filter(isRendered);
+
+    const expectedTitle = normalizedComparable(meeting?.title || '');
+    const expectedDate = meeting?.dateStamp || '';
+    const matches = [];
+
+    for (const card of cards) {
+      const { headingText } = recapCardContext(card);
+      const dateStamp = toDateStamp(
+        parseFlexibleDate(headingText, currentCalendarMonthYear()?.year)
+      );
+
+      const titleNode = card.querySelector('[data-tid="meeting-title"]');
+      const cardTitle = normalize(
+        titleNode?.innerText ||
+        titleNode?.textContent ||
+        card.querySelector('[data-testid="meeting-recap-chiclet-top-container"]')?.innerText ||
+        card.innerText ||
+        ''
+      );
+      const comparableCard = normalizedComparable(cardTitle);
+      const comparableHeading = normalizedComparable(headingText);
+
+      const titleMatches =
+        !!expectedTitle &&
+        (comparableCard.includes(expectedTitle) || comparableHeading.includes(expectedTitle));
+      const dateMatches = !!expectedDate && dateStamp === expectedDate;
+
+      if (!titleMatches || !dateMatches) continue;
+
+      const recordingButton = card.querySelector(
+        '[data-testid="meeting-recap-chiclet-recording-image"]'
+      );
+      const transcriptButton = Array.from(card.querySelectorAll('button')).find(btn =>
+        normalize(btn.getAttribute('aria-label') || btn.innerText || '') === 'Transcript'
+      );
+      const viewRecapButton = card.querySelector(
+        '[data-testid="view-meeting-recap-button"], [data-testid="meeting-recap-chiclet-view-recap-button"]'
+      );
+
+      const actions = {};
+      for (const [kind, el] of [
+        ['recording', recordingButton],
+        ['transcript', transcriptButton],
+        ['recap', viewRecapButton]
+      ]) {
+        if (!el) continue;
+        const actionId = `exact-${kind}-${hash(`${meeting.id}|${kind}|${headingText}`)}`;
+        actionMap.set(actionId, el);
+        actions[`${kind}ActionId`] = actionId;
+      }
+
+      matches.push({
+        kind: card.getAttribute('data-testid') || '',
+        dateStamp,
+        headingText: headingText.slice(0, 1200),
+        cardTitle: cleanMeetingTitle(headingText),
+        actions,
+        hasRecording: !!recordingButton,
+        hasTranscript: !!transcriptButton,
+        hasViewRecap: !!viewRecapButton
+      });
+    }
+
+    return {
+      ok: true,
+      match: matches[0] || null,
+      matches,
+      pageTitle: document.title,
+      url: location.href
+    };
   }
 
   function findRecapCards() {
@@ -748,6 +856,14 @@
 
     if (type === 'CALENDAR_SCAN') {
       sendResponse({ ok: true, meetings: scanCalendarMeetings(), pageKind: pageKind(), url: location.href });
+      return;
+    }
+    if (type === 'CALENDAR_OPEN_MEETING_CHAT') {
+      openMeetingChatFromCalendar(message.meeting).then(sendResponse);
+      return true;
+    }
+    if (type === 'PAGE_FIND_MEETING_RECAP_EXACT') {
+      sendResponse(findMeetingRecap(message.meeting));
       return;
     }
     if (type === 'CALENDAR_OPEN_MEETING') {

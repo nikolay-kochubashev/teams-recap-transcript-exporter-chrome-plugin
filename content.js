@@ -2,7 +2,7 @@
   if (window.__teamsRecapTranscriptExporterLoaded) return;
   window.__teamsRecapTranscriptExporterLoaded = true;
 
-  const VERSION = '1.6.0';
+  const VERSION = '1.6.1';
   const state = {
     status: 'idle',
     message: 'Готово к работе.',
@@ -62,7 +62,26 @@
     if (!isRendered(el)) return false;
     const style = getComputedStyle(el);
     const oy = style.overflowY;
-    return (oy === 'auto' || oy === 'scroll' || oy === 'overlay') && el.scrollHeight > el.clientHeight + 40;
+    const hasScrollableGeometry = el.scrollHeight > el.clientHeight + 40;
+    if (!hasScrollableGeometry) return false;
+
+    // Teams changes the meeting Recap layout depending on viewport width:
+    // - wide: dedicated transcript scroller on the right;
+    // - narrow/responsive: Transcript is below the video and the parent/main
+    //   content area may be the scroll driver.
+    // Programmatic scrolling works for overflow:hidden too, so do not exclude it.
+    if (oy === 'auto' || oy === 'scroll' || oy === 'overlay' || oy === 'hidden') return true;
+
+    // Last-resort page/main-content scroll containers can report overflow:visible.
+    // Keep them as candidates; semantic scoring below decides whether they are
+    // really related to the transcript.
+    return (
+      el === document.scrollingElement ||
+      el === document.documentElement ||
+      el === document.body ||
+      el.getAttribute('role') === 'main' ||
+      el.tagName === 'MAIN'
+    );
   }
 
   const clockTimeRegex = /(?:^|\s)(?:\d{1,2}:)?\d{1,2}:\d{2}(?:\s|$)/g;
@@ -134,75 +153,87 @@
     for (const el of document.querySelectorAll('body *')) {
       if (!isScrollable(el)) continue;
       const r = el.getBoundingClientRect();
-      if (r.width < 220 || r.height < 120) continue;
+      if (r.width < 160 || r.height < 80) continue;
 
       const text = normalize(el.innerText || el.textContent || '');
       if (text.length < 20) continue;
 
       let score = 0;
       const reasons = [];
-      const sample = text.slice(0, 16000);
+      const sample = text.slice(0, 24000);
       const times = (sample.match(clockTimeRegex) || []).length;
       const idClass = `${el.id || ''} ${typeof el.className === 'string' ? el.className : ''} ${el.getAttribute('aria-label') || ''}`;
-      const ancestorText = normalize(el.parentElement?.innerText || '').slice(0, 2200);
+      const ancestorText = normalize(el.parentElement?.innerText || '').slice(0, 3200);
       const vote = votes.get(el);
+      const hasAiWarning = /AI-generated content may be incorrect/i.test(sample);
+      const hasTranscriptA11y = /Transcript\. Use arrow keys to navigate between transcript entries/i.test(sample);
+      const hasTranscriptText = transcriptWord.test(sample.slice(0, 3000));
+      const hasStrongTranscriptSignal = hasAiWarning || hasTranscriptA11y || (hasTranscriptText && times >= 1);
 
       if (vote?.count) {
-        score += vote.count * 55;
+        score += vote.count * 65;
         reasons.push(`entry-votes:${vote.count}`);
       }
-      if (transcriptWord.test(idClass)) { score += 130; reasons.push('transcript-id/class'); }
-      if (/Transcript\. Use arrow keys to navigate between transcript entries/i.test(sample)) {
-        score += 240; reasons.push('transcript-a11y');
+      if (transcriptWord.test(idClass)) { score += 150; reasons.push('transcript-id/class'); }
+      if (hasTranscriptA11y) {
+        score += 260; reasons.push('transcript-a11y');
       }
-      if (/AI-generated content may be incorrect/i.test(sample)) {
-        score += 90; reasons.push('ai-warning');
+      if (hasAiWarning) {
+        score += 150; reasons.push('ai-warning');
       }
-      if (transcriptWord.test(sample.slice(0, 1800))) { score += 70; reasons.push('transcript-text'); }
-      if (transcriptWord.test(ancestorText)) { score += 45; reasons.push('transcript-parent'); }
-      if (times >= 2) { score += Math.min(120, times * 10); reasons.push(`times:${times}`); }
+      if (hasTranscriptText) { score += 90; reasons.push('transcript-text'); }
+      if (transcriptWord.test(ancestorText)) { score += 55; reasons.push('transcript-parent'); }
+      if (times >= 1) { score += Math.min(160, times * 14); reasons.push(`times:${times}`); }
 
-      // Semantic proximity to the Transcript heading/tab. This replaces the old
-      // assumption that the transcript must be a narrow panel on the right.
+      // Semantic proximity to the Transcript tab/heading. Geometry is only used
+      // for proximity, not for deciding whether Transcript must be on the right.
       for (const h of headingRects) {
         const dy = r.top - h.bottom;
-        if (dy >= -30 && dy <= 520 && horizontalOverlap(r, h) >= 0.28) {
-          const bonus = dy <= 220 ? 150 : 90;
+        if (dy >= -80 && dy <= 900 && horizontalOverlap(r, h) >= 0.18) {
+          const bonus = dy <= 300 ? 170 : 100;
           score += bonus;
           reasons.push('near-transcript-heading');
           break;
         }
       }
 
+      // A responsive main-content scroller can legitimately contain the video
+      // and the Transcript section at the same time. Penalize it only mildly
+      // when transcript semantics are already present.
       if (el.querySelector('video')) {
-        score -= 500;
+        score -= hasStrongTranscriptSignal ? 35 : 260;
         reasons.push('contains-video');
       }
       if (/\bRecord\b[\s\S]{0,200}\bUpload\b[\s\S]{0,200}\bFavorite\b/i.test(sample.slice(0, 2500))) {
-        score -= 180;
+        score -= hasStrongTranscriptSignal ? 25 : 140;
         reasons.push('page-shell');
       }
       if (!isInViewport(el)) {
-        score -= 20;
+        score -= 10;
         reasons.push('offscreen');
       }
 
-      // Geometry is now only a weak tie-breaker, never a requirement.
-      if (r.left > innerWidth * 0.55) score += 5;
-      if (r.width < innerWidth * 0.55) score += 5;
-      if (el.scrollHeight > el.clientHeight * 1.8) score += 20;
+      if (el.scrollHeight > el.clientHeight * 1.25) score += 20;
+      if (el.scrollHeight > el.clientHeight * 2.0) score += 15;
 
       candidates.push({
         el, score, times, votes: vote?.count || 0, reasons,
+        strong: hasStrongTranscriptSignal,
         rect: { x: r.x, y: r.y, width: r.width, height: r.height },
+        scroll: { clientHeight: el.clientHeight, scrollHeight: el.scrollHeight, scrollTop: el.scrollTop },
+        overflowY: getComputedStyle(el).overflowY,
         idClass
       });
     }
 
-    candidates.sort((a, b) => b.score - a.score || b.votes - a.votes || b.times - a.times);
+    candidates.sort((a, b) =>
+      Number(b.strong) - Number(a.strong) ||
+      b.score - a.score ||
+      b.votes - a.votes ||
+      b.times - a.times
+    );
     return candidates;
   }
-
   const durationOnlyRegex = /^(?:(\d+)\s+hours?\s*)?(?:(\d+)\s+minutes?\s*)?(?:(\d+)\s+seconds?)$/i;
   const clockOnlyRegex = /^(?:\d{1,2}:)?\d{1,2}:\d{2}$/;
   const initialsRegex = /^[A-ZА-ЯЁӘҒҚҢӨҰҮҺІ]{1,3}$/u;
@@ -385,11 +416,48 @@
     lastRunDebug = run;
 
     try {
-      const candidates = findTranscriptScroller();
-      const best = candidates[0];
-      if (!best || best.score < 45) throw new Error('Не удалось уверенно определить панель Transcript. Запусти диагностику.');
+      let candidates = [];
+      let best = null;
+      const discoveryStarted = Date.now();
+      while (Date.now() - discoveryStarted < 8000) {
+        candidates = findTranscriptScroller();
+        best = candidates[0] || null;
+        if (best && (best.strong || best.score >= 45)) break;
+        await sleep(250);
+      }
+      if (!best || (!best.strong && best.score < 45)) {
+        run.events.push({
+          event: 'transcript-scroller-not-found',
+          viewport: { width: innerWidth, height: innerHeight },
+          candidates: candidates.slice(0, 8).map(x => ({
+            score: x.score,
+            strong: x.strong,
+            times: x.times,
+            votes: x.votes,
+            reasons: x.reasons,
+            rect: x.rect,
+            scroll: x.scroll,
+            overflowY: x.overflowY,
+            idClass: x.idClass
+          }))
+        });
+        throw new Error('Не удалось уверенно определить область прокрутки Transcript. Запусти диагностику.');
+      }
 
       let scroller = best.el;
+      run.events.push({
+        event: 'transcript-scroller-selected',
+        viewport: { width: innerWidth, height: innerHeight },
+        score: best.score,
+        strong: best.strong,
+        times: best.times,
+        votes: best.votes,
+        reasons: best.reasons,
+        rect: best.rect,
+        scroll: best.scroll,
+        overflowY: best.overflowY,
+        idClass: best.idClass
+      });
       const title = sanitizeFileName(normalize(document.querySelector('h1')?.innerText || document.title || 'teams-transcript'));
       const mediaDuration = getMediaDurationSeconds();
       run.mediaDurationSeconds = mediaDuration;
@@ -442,7 +510,9 @@
 
         if (!scroller.isConnected || scroller.clientHeight < 40) {
           const refreshed = findTranscriptScroller()[0];
-          if (!refreshed || refreshed.score < 45) throw new Error('Панель Transcript была перестроена страницей и не найдена повторно. Запусти диагностику.');
+          if (!refreshed || (!refreshed.strong && refreshed.score < 45)) {
+            throw new Error('Область Transcript была перестроена страницей и не найдена повторно. Запусти диагностику.');
+          }
           scroller = refreshed.el;
           run.events.push({ i: iteration + 1, event: 'scroller-reselected', score: refreshed.score, votes: refreshed.votes || 0, reasons: refreshed.reasons || [] });
         }

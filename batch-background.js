@@ -480,6 +480,52 @@ async function discoverRecordingUrls(tabId, meeting) {
     meetingTitle: meeting.title || ''
   });
 
+  if (isRecordingUrl(tab.url)) return [tab.url];
+
+  // Teams can navigate directly from Calendar to the full meeting Details
+  // view. In that page Recording/Transcript are already exposed as assets.
+  let details = null;
+  try {
+    details = await sendTab(tabId, {
+      type: 'PAGE_FIND_MEETING_DETAILS_ASSETS',
+      meeting
+    }, 5000);
+  } catch (_) {}
+
+  await appendOperation('MEETING_DETAILS_ASSETS', {
+    meetingId: meeting.id,
+    match: !!details?.match,
+    pageTitle: details?.pageTitle || '',
+    url: details?.url || '',
+    found: details?.found || null,
+    actions: details?.actions || {}
+  }, details?.match ? 'INFO' : 'WARN');
+
+  if (details?.match) {
+    const actions = details.actions || {};
+
+    if (actions.recordingActionId) {
+      const urls = await triggerExactActionAndFindRecording(
+        tabId,
+        actions.recordingActionId,
+        meeting
+      );
+      if (urls.length) return urls;
+    }
+
+    if (actions.recapTabActionId) {
+      await sendTab(tabId, {
+        type: 'PAGE_TRIGGER_ACTION',
+        id: actions.recapTabActionId
+      }, 5000);
+      await delay(1200);
+
+      const page = await findActionsWithWait(tabId, 10000);
+      const directUrls = (page?.recordingLinks || []).map(x => x.href).filter(Boolean);
+      if (directUrls.length) return [...new Set(directUrls)];
+    }
+  }
+
   const recap = await waitForExactMeetingRecap(tabId, meeting, 20000);
 
   await appendOperation('EXACT_RECAP_LOOKUP', {
@@ -494,9 +540,6 @@ async function discoverRecordingUrls(tabId, meeting) {
 
   const actions = recap.match.actions || {};
 
-  // Preferred path: the recap card itself exposes the recording image button.
-  // This is present in both known Teams DOM variants:
-  // meeting-recap-object and meeting-recap-chiclet.
   if (actions.recordingActionId) {
     const urls = await triggerExactActionAndFindRecording(
       tabId,
@@ -506,7 +549,6 @@ async function discoverRecordingUrls(tabId, meeting) {
     if (urls.length) return urls;
   }
 
-  // Fallback: enter this exact recap card and resolve recording links there.
   if (actions.recapActionId) {
     await appendOperation('EXACT_RECAP_FALLBACK', {
       meetingId: meeting.id,
@@ -612,6 +654,28 @@ async function restoreCalendarForMeeting(tabId, meeting, timeoutMs = 30000) {
           startTime: x.startTime
         }))
       }, 'WARN');
+
+      if (!current.candidates.length) {
+        let nav = null;
+        try {
+          nav = await sendTab(tabId, { type: 'PAGE_OPEN_CALENDAR' }, 12000);
+        } catch (e) {
+          nav = { ok: false, error: e?.message || String(e) };
+        }
+
+        await appendOperation('CALENDAR_NAVIGATION_RESULT', {
+          meetingId: meeting.id,
+          ok: !!nav?.ok,
+          alreadyCalendar: !!nav?.alreadyCalendar,
+          url: nav?.url || '',
+          error: nav?.error || ''
+        }, nav?.ok ? 'INFO' : 'WARN');
+
+        if (nav?.ok) {
+          await delay(800);
+          continue;
+        }
+      }
 
       const ensured = await sendTab(tabId, {
         type: 'CALENDAR_ENSURE_DATE',
@@ -721,11 +785,13 @@ async function processMeeting(meeting, index) {
       throw new Error(opened?.error || 'Не удалось открыть чат выбранной встречи из Calendar.');
     }
 
-    await appendOperation('OPEN_MEETING_CHAT_OK', {
+    await appendOperation('OPEN_MEETING_VIEW_OK', {
       meetingId: meeting.id,
       calendarTabId,
+      mode: opened.mode || '',
       url: opened.url || '',
-      target: opened.target || {}
+      target: opened.target || {},
+      details: opened.details || null
     });
 
     await delay(1600);
@@ -932,6 +998,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (type === 'BATCH_SCAN_CALENDAR') {
     (async () => {
       try {
+        await patchBatch({ operationLog: [] });
         const meetings = await scanCalendar(message.tabId);
         sendResponse({ ok: true, meetings, state: batchState });
       } catch (e) {

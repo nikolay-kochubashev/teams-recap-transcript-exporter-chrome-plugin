@@ -183,16 +183,88 @@ async function triggerPreferredAction(tabId, actions, kinds) {
   const action = (actions || []).find(a => kinds.includes(a.kind));
   if (!action) return null;
 
+  // Never navigate the Calendar anchor tab through an href.
+  // Href targets are resolved in their own background tab.
   if (action.href && /^https?:/i.test(action.href)) {
-    await chrome.tabs.update(tabId, { url: action.href, active: false });
-    await waitTabComplete(tabId, 30000);
-    await delay(700);
     return action;
   }
 
   await sendTab(tabId, { type: 'PAGE_TRIGGER_ACTION', id: action.id }, 5000);
   await delay(1200);
   return action;
+}
+
+async function triggerActionAndCaptureNewTabs(tabId, actionId) {
+  const source = await chrome.tabs.get(tabId);
+  const before = await chrome.tabs.query({ windowId: source.windowId });
+  const beforeIds = new Set(before.map(t => t.id));
+
+  await sendTab(tabId, { type: 'PAGE_TRIGGER_ACTION', id: actionId }, 5000);
+  await delay(1600);
+
+  const after = await chrome.tabs.query({ windowId: source.windowId });
+  const created = after.filter(t => !beforeIds.has(t.id));
+
+  return {
+    current: await chrome.tabs.get(tabId),
+    created
+  };
+}
+
+async function resolveHrefForRecordings(url, meeting) {
+  if (!url || !/^https?:/i.test(url)) return [];
+  if (isRecordingUrl(url)) return [url];
+
+  let tabId = null;
+  try {
+    const tab = await chrome.tabs.create({ url, active: false });
+    tabId = tab.id;
+    await waitTabComplete(tabId, 30000);
+    await delay(1000);
+
+    const loaded = await chrome.tabs.get(tabId);
+    if (isRecordingUrl(loaded.url)) return [loaded.url];
+
+    let page = await findActionsWithWait(tabId, 8000);
+    let urls = (page?.recordingLinks || []).map(x => x.href).filter(Boolean);
+    if (urls.length) return [...new Set(urls)];
+
+    const cards = await waitForRecapCards(tabId, meeting?.dateStamp, 5000);
+    if (cards.length) {
+      const target = cards[0];
+      if (target.href && isRecordingUrl(target.href)) return [target.href];
+      if (!target.href) {
+        await sendTab(tabId, { type: 'PAGE_TRIGGER_ACTION', id: target.id }, 5000);
+        await delay(1500);
+        const after = await chrome.tabs.get(tabId);
+        if (isRecordingUrl(after.url)) return [after.url];
+        page = await findActionsWithWait(tabId, 8000);
+        urls = (page?.recordingLinks || []).map(x => x.href).filter(Boolean);
+        if (urls.length) return [...new Set(urls)];
+      }
+    }
+  } catch (_) {
+  } finally {
+    if (tabId) {
+      try { await chrome.tabs.remove(tabId); } catch (_) {}
+    }
+  }
+  return [];
+}
+
+async function waitForRecapCards(tabId, dateStamp, timeoutMs = 12000) {
+  const started = Date.now();
+  let last = [];
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const response = await sendTab(tabId, { type: 'PAGE_FIND_RECAP_CARDS' }, 3500);
+      last = response?.cards || [];
+      const matching = dateStamp ? last.filter(x => x.dateStamp === dateStamp) : last;
+      if (matching.length) return matching;
+    } catch (_) {}
+    await delay(500);
+  }
+  return dateStamp ? last.filter(x => x.dateStamp === dateStamp) : last;
 }
 
 async function extractRecordingFromTab(tabId, meeting, recordingUrl, recordingIndex) {
@@ -288,117 +360,161 @@ async function processRecordingUrl(url, meeting, index, reuseTabId = null) {
   }
 }
 
-async function discoverRecordingUrls(tempTabId) {
-  let tab = await chrome.tabs.get(tempTabId);
-  await appendOperation('DISCOVER_RECORDING_START', { tabId: tempTabId, url: tab.url });
+async function discoverRecordingUrls(tabId, meeting) {
+  let tab = await chrome.tabs.get(tabId);
+  await appendOperation('DISCOVER_RECORDING_START', {
+    tabId,
+    url: tab.url,
+    meetingId: meeting?.id,
+    meetingDate: meeting?.dateStamp || ''
+  });
+
   if (isRecordingUrl(tab.url)) return [tab.url];
 
-  let page = await findActionsWithWait(tempTabId, 6000);
+  let page = await findActionsWithWait(tabId, 6500);
   await appendOperation('DISCOVER_ACTIONS', {
-    tabId: tempTabId,
+    tabId,
     url: tab.url,
-    actions: (page.actions || []).map(a => ({ kind: a.kind, label: a.label, href: a.href || '' })).slice(0, 40),
+    actions: (page.actions || []).map(a => ({ kind: a.kind, label: a.label, href: a.href || '' })).slice(0, 50),
     recordingLinks: (page.recordingLinks || []).slice(0, 20)
   });
+
   let urls = (page.recordingLinks || []).map(x => x.href).filter(Boolean);
   if (urls.length) return [...new Set(urls)];
 
-  const direct = (page.actions || [])
-    .find(a => ['recap', 'recording'].includes(a.kind) && a.href);
-
-  if (direct?.href) {
-    if (isRecordingUrl(direct.href)) return [direct.href];
-
-    await chrome.tabs.update(tempTabId, { url: direct.href, active: false });
-    await waitTabComplete(tempTabId, 30000);
-    await delay(900);
-
-    tab = await chrome.tabs.get(tempTabId);
-    if (isRecordingUrl(tab.url)) return [tab.url];
-
-    page = await findActionsWithWait(tempTabId, 7000);
-    urls = (page.recordingLinks || []).map(x => x.href).filter(Boolean);
-    if (urls.length) return [...new Set(urls)];
+  // Resolve direct Recap/Recording hrefs outside the Calendar anchor tab.
+  for (const action of (page.actions || []).filter(a => ['recap', 'recording'].includes(a.kind) && a.href)) {
+    const resolved = await resolveHrefForRecordings(action.href, meeting);
+    if (resolved.length) return resolved;
   }
 
-  const clickableDirect = (page.actions || [])
-    .find(a => ['recap', 'recording'].includes(a.kind) && !a.href);
-
+  // A meeting details page can expose a clickable Recap without an href.
+  const clickableDirect = (page.actions || []).find(a =>
+    ['recap', 'recording'].includes(a.kind) && !a.href
+  );
   if (clickableDirect) {
-    await triggerPreferredAction(tempTabId, page.actions, ['recap', 'recording']);
-    await delay(1200);
+    const nav = await triggerActionAndCaptureNewTabs(tabId, clickableDirect.id);
 
-    tab = await chrome.tabs.get(tempTabId);
+    for (const created of nav.created || []) {
+      if (isRecordingUrl(created.url)) return [created.url];
+      const resolved = await resolveHrefForRecordings(created.url, meeting);
+      if (resolved.length) return resolved;
+      if (/^(chrome|about):/i.test(created.url || '') || !created.url) {
+        try { await chrome.tabs.remove(created.id); } catch (_) {}
+      }
+    }
+
+    tab = nav.current;
     if (isRecordingUrl(tab.url)) return [tab.url];
 
-    page = await findActionsWithWait(tempTabId, 7000);
+    page = await findActionsWithWait(tabId, 8000);
     urls = (page.recordingLinks || []).map(x => x.href).filter(Boolean);
     if (urls.length) return [...new Set(urls)];
   }
 
-  page = page || await findActionsWithWait(tempTabId, 4000);
+  // Fall back to Meeting Chat.
+  page = await findActionsWithWait(tabId, 5000);
   const chatAction = (page.actions || []).find(a => a.kind === 'chat');
-  if (!chatAction) return [];
+  if (chatAction) {
+    if (chatAction.href) {
+      const resolved = await resolveHrefForRecordings(chatAction.href, meeting);
+      if (resolved.length) return resolved;
+    } else {
+      await triggerActionAndCaptureNewTabs(tabId, chatAction.id);
+      await delay(1400);
+    }
+  }
 
-  await triggerPreferredAction(tempTabId, page.actions, ['chat']);
-  await delay(1200);
-
-  tab = await chrome.tabs.get(tempTabId);
+  tab = await chrome.tabs.get(tabId);
   if (isRecordingUrl(tab.url)) return [tab.url];
 
-  page = await findActionsWithWait(tempTabId, 10000);
-  urls = (page.recordingLinks || []).map(x => x.href).filter(Boolean);
-  if (urls.length) return [...new Set(urls)];
+  // Recurring chats contain recap cards for many dates. Match the selected
+  // Calendar occurrence by date instead of taking the first View recap.
+  const recapCards = await waitForRecapCards(tabId, meeting?.dateStamp, 15000);
+  await appendOperation('RECAP_CARDS_RESULT', {
+    meetingId: meeting?.id,
+    meetingDate: meeting?.dateStamp || '',
+    count: recapCards.length,
+    cards: recapCards.slice(0, 20)
+  });
 
-  const recapInChat = (page.actions || [])
-    .find(a => ['recap', 'recording'].includes(a.kind));
+  if (recapCards.length) {
+    const card = recapCards[0];
 
-  if (recapInChat) {
-    await triggerPreferredAction(tempTabId, page.actions, ['recap', 'recording']);
-    await delay(1500);
+    if (card.href) {
+      const resolved = await resolveHrefForRecordings(card.href, meeting);
+      if (resolved.length) return resolved;
+    } else {
+      const nav = await triggerActionAndCaptureNewTabs(tabId, card.id);
 
-    tab = await chrome.tabs.get(tempTabId);
-    if (isRecordingUrl(tab.url)) return [tab.url];
+      for (const created of nav.created || []) {
+        if (isRecordingUrl(created.url)) return [created.url];
+        const resolved = await resolveHrefForRecordings(created.url, meeting);
+        if (resolved.length) return resolved;
+        if (/^(chrome|about):/i.test(created.url || '') || !created.url) {
+          try { await chrome.tabs.remove(created.id); } catch (_) {}
+        }
+      }
 
-    page = await findActionsWithWait(tempTabId, 8000);
-    urls = (page.recordingLinks || []).map(x => x.href).filter(Boolean);
+      tab = nav.current;
+      if (isRecordingUrl(tab.url)) return [tab.url];
+
+      page = await findActionsWithWait(tabId, 12000);
+      urls = (page.recordingLinks || []).map(x => x.href).filter(Boolean);
+      if (urls.length) return [...new Set(urls)];
+
+      for (const action of (page.actions || []).filter(a => ['recap', 'recording'].includes(a.kind) && a.href)) {
+        const resolved = await resolveHrefForRecordings(action.href, meeting);
+        if (resolved.length) return resolved;
+      }
+    }
   }
 
-  return [...new Set(urls)];
+  return [];
 }
 
 async function restoreCalendarForMeeting(tabId, meeting, timeoutMs = 30000) {
   const started = Date.now();
-  let backAttempts = 0;
 
   while (Date.now() - started < timeoutMs) {
     try {
-      const response = await sendTab(tabId, { type: 'CALENDAR_SCAN' }, 4000);
+      const ensured = await sendTab(tabId, {
+        type: 'CALENDAR_ENSURE_DATE',
+        dateStamp: meeting.dateStamp
+      }, 15000);
+
+      await appendOperation('CALENDAR_ENSURE_DATE_RESULT', {
+        meetingId: meeting.id,
+        dateStamp: meeting.dateStamp,
+        ok: !!ensured?.ok,
+        range: ensured?.range || null,
+        attempts: ensured?.attempts ?? null,
+        error: ensured?.error || ''
+      }, ensured?.ok ? 'INFO' : 'WARN');
+
+      if (!ensured?.ok) {
+        await delay(700);
+        continue;
+      }
+
+      const response = await sendTab(tabId, { type: 'CALENDAR_SCAN' }, 5000);
       const found = (response?.meetings || []).some(m =>
         m.id === meeting.id ||
         (m.label && meeting.label && m.label === meeting.label) ||
         (m.title === meeting.title && m.dateStamp === meeting.dateStamp && m.startTime === meeting.startTime)
       );
+
       if (response?.ok && found) {
-        return { ok: true, url: response.url || '' };
+        return { ok: true, url: response.url || '', range: ensured.range || null };
       }
-    } catch (_) {}
-
-    if (backAttempts >= 6) break;
-
-    try {
-      await appendOperation('CALENDAR_RESTORE_BACK', {
-        tabId,
+    } catch (e) {
+      await appendOperation('CALENDAR_ENSURE_DATE_ERROR', {
         meetingId: meeting.id,
-        attempt: backAttempts + 1
-      });
-      await chrome.tabs.goBack(tabId);
-      backAttempts++;
-      await waitTabComplete(tabId, 20000);
-      await delay(1200);
-    } catch (_) {
-      break;
+        error: e?.message || String(e)
+      }, 'WARN');
     }
+
+    await delay(700);
   }
 
   return { ok: false };
@@ -463,7 +579,7 @@ async function processMeeting(meeting, index) {
 
     await delay(1600);
 
-    const urls = await discoverRecordingUrls(calendarTabId);
+    const urls = await discoverRecordingUrls(calendarTabId, meeting);
 
     await appendOperation('RECORDING_URLS_RESULT', {
       meetingId: meeting.id,
@@ -475,12 +591,12 @@ async function processMeeting(meeting, index) {
     if (!urls.length) {
       await appendOperation('MEETING_SKIP', {
         meetingId: meeting.id,
-        reason: 'Запись/Recap не найдены.'
+        reason: 'Recap/Transcript для выбранной даты не найден.'
       }, 'WARN');
 
       await logMeeting(meeting.id, {
         status: 'skip',
-        message: 'Запись/Recap не найдены.',
+        message: 'Recap/Transcript для выбранной даты не найден.',
         files: []
       });
       return;

@@ -571,22 +571,50 @@ async function waitForMeetingDetailsAssets(tabId, meeting, timeoutMs = 7000) {
   return last;
 }
 
-async function tryExtractTranscriptFromMeetingDetails(tabId, meeting) {
-  const details = await waitForMeetingDetailsAssets(tabId, meeting, 8000);
+function isRecurringMeeting(meeting) {
+  return /\brecurring meeting\b/i.test(String(meeting?.label || ''));
+}
 
-  await appendOperation('DETAILS_TRANSCRIPT_LOOKUP', {
-    meetingId: meeting.id,
-    match: !!details?.match,
-    found: details?.found || null,
-    meta: details?.meta || null,
-    actions: details?.actions || {},
-    pageTitle: details?.pageTitle || '',
-    url: details?.url || ''
-  }, details?.found?.transcript ? 'INFO' : 'WARN');
+async function ensureExactRecapCard(tabId, meeting, timeoutMs = 12000) {
+  let recap = await waitForExactMeetingRecap(tabId, meeting, Math.min(3000, timeoutMs));
+  if (recap?.match) return recap;
 
-  const actionId = details?.actions?.transcriptActionId;
-  if (!actionId) return null;
+  // Calendar may open the Recap/Details surface directly. For recurring
+  // meetings we must return to Chat, where every occurrence has its own
+  // recap card containing the real occurrence date.
+  try {
+    const details = await sendTab(tabId, {
+      type: 'PAGE_FIND_MEETING_DETAILS_ASSETS',
+      meeting
+    }, 5000);
 
+    const chatActionId = details?.actions?.chatTabActionId;
+    if (chatActionId) {
+      const trigger = await sendTab(tabId, {
+        type: 'PAGE_TRIGGER_ACTION',
+        id: chatActionId
+      }, 5000);
+
+      await appendOperation('EXACT_RECAP_CHAT_TRIGGER', {
+        meetingId: meeting.id,
+        actionId: chatActionId,
+        trigger
+      }, trigger?.ok ? 'INFO' : 'WARN');
+
+      if (trigger?.ok) await delay(900);
+    }
+  } catch (e) {
+    await appendOperation('EXACT_RECAP_CHAT_TRIGGER_ERROR', {
+      meetingId: meeting.id,
+      error: e?.message || String(e)
+    }, 'WARN');
+  }
+
+  recap = await waitForExactMeetingRecap(tabId, meeting, timeoutMs);
+  return recap;
+}
+
+async function extractTranscriptAfterAction(tabId, meeting, actionId, recordingIndex, sourcePrefix) {
   let trigger = null;
   try {
     trigger = await sendTab(tabId, {
@@ -594,16 +622,18 @@ async function tryExtractTranscriptFromMeetingDetails(tabId, meeting) {
       id: actionId
     }, 5000);
   } catch (e) {
-    await appendOperation('DETAILS_TRANSCRIPT_TRIGGER_ERROR', {
+    await appendOperation(`${sourcePrefix}_TRANSCRIPT_TRIGGER_ERROR`, {
       meetingId: meeting.id,
+      actionId,
       error: e?.message || String(e)
     }, 'WARN');
     return null;
   }
 
-  await appendOperation('DETAILS_TRANSCRIPT_TRIGGER', {
+  await appendOperation(`${sourcePrefix}_TRANSCRIPT_TRIGGER`, {
     meetingId: meeting.id,
     actionId,
+    recordingIndex,
     trigger
   }, trigger?.ok ? 'INFO' : 'WARN');
 
@@ -612,16 +642,15 @@ async function tryExtractTranscriptFromMeetingDetails(tabId, meeting) {
   await delay(1400);
 
   try {
-    // Reset the generic transcript collector because the same Teams tab may
-    // have stale state from a previous attempt.
     try {
       await sendTab(tabId, { type: 'CLEAR_RESULT' }, 3000);
     } catch (_) {}
 
     const probe = await probeTranscriptFrames(tabId, 10000);
 
-    await appendOperation('DETAILS_TRANSCRIPT_FRAME_LOOKUP', {
+    await appendOperation(`${sourcePrefix}_TRANSCRIPT_FRAME_LOOKUP`, {
       meetingId: meeting.id,
+      recordingIndex,
       selectedFrameId: probe.selected?.frameId ?? null,
       frames: probe.frames.slice(0, 12).map(x => ({
         frameId: x.frameId,
@@ -637,8 +666,9 @@ async function tryExtractTranscriptFromMeetingDetails(tabId, meeting) {
 
     if (!probe.selected) {
       const diagnostics = await collectFrameDiagnostics(tabId);
-      await appendOperation('DETAILS_TRANSCRIPT_FRAME_DIAGNOSTIC', {
+      await appendOperation(`${sourcePrefix}_TRANSCRIPT_FRAME_DIAGNOSTIC`, {
         meetingId: meeting.id,
+        recordingIndex,
         diagnostics
       }, 'WARN');
       throw new Error('Transcript открыт, но область транскрипции не найдена ни в одном frame.');
@@ -653,12 +683,13 @@ async function tryExtractTranscriptFromMeetingDetails(tabId, meeting) {
       tabId,
       meeting,
       tab.url || 'https://teams.microsoft.com/v2/',
-      0,
+      recordingIndex,
       probe.selected.frameId
     );
 
-    await appendOperation('DETAILS_TRANSCRIPT_EXTRACT_OK', {
+    await appendOperation(`${sourcePrefix}_TRANSCRIPT_EXTRACT_OK`, {
       meetingId: meeting.id,
+      recordingIndex,
       frameId: probe.selected.frameId,
       fileName: file?.fileName || '',
       path: file?.path || '',
@@ -671,13 +702,108 @@ async function tryExtractTranscriptFromMeetingDetails(tabId, meeting) {
     let diagnostics = [];
     try { diagnostics = await collectFrameDiagnostics(tabId); } catch (_) {}
 
-    await appendOperation('DETAILS_TRANSCRIPT_EXTRACT_FAILED', {
+    await appendOperation(`${sourcePrefix}_TRANSCRIPT_EXTRACT_FAILED`, {
       meetingId: meeting.id,
+      recordingIndex,
       error: e?.message || String(e),
       diagnostics
     }, 'WARN');
     return null;
   }
+}
+
+async function tryExtractTranscriptsFromExactRecap(tabId, meeting) {
+  let recap = await ensureExactRecapCard(tabId, meeting, 12000);
+
+  await appendOperation('EXACT_TRANSCRIPT_RECAP_LOOKUP', {
+    meetingId: meeting.id,
+    expectedDate: meeting.dateStamp || '',
+    pageTitle: recap?.pageTitle || '',
+    url: recap?.url || '',
+    match: recap?.match || null,
+    matches: (recap?.matches || []).slice(0, 10)
+  }, recap?.match ? 'INFO' : 'WARN');
+
+  if (!recap?.match) return [];
+
+  let actionIds = recap.match.actions?.transcriptActionIds ||
+    (recap.match.actions?.transcriptActionId ? [recap.match.actions.transcriptActionId] : []);
+
+  if (!actionIds.length) return [];
+
+  const files = [];
+  const expectedCount = actionIds.length;
+
+  for (let index = 0; index < expectedCount; index++) {
+    if (stopRequested) throw new Error('Остановлено пользователем.');
+
+    // Opening a transcript changes the SPA surface and invalidates DOM action
+    // references. Re-locate the exact dated recap card before every next file.
+    if (index > 0) {
+      recap = await ensureExactRecapCard(tabId, meeting, 12000);
+      actionIds = recap?.match?.actions?.transcriptActionIds ||
+        (recap?.match?.actions?.transcriptActionId ? [recap.match.actions.transcriptActionId] : []);
+
+      if (!actionIds[index]) {
+        await appendOperation('EXACT_TRANSCRIPT_ACTION_MISSING', {
+          meetingId: meeting.id,
+          expectedDate: meeting.dateStamp || '',
+          index,
+          expectedCount,
+          availableCount: actionIds.length
+        }, 'WARN');
+        break;
+      }
+    }
+
+    const file = await extractTranscriptAfterAction(
+      tabId,
+      meeting,
+      actionIds[index],
+      index,
+      'EXACT_RECAP'
+    );
+
+    if (file) files.push(file);
+  }
+
+  return files;
+}
+
+async function tryExtractTranscriptFromMeetingDetails(tabId, meeting) {
+  // Generic Details/Recap controls are unsafe for recurring meetings because
+  // Teams can keep the series chat open while selecting a different occurrence.
+  // Recurring occurrences are handled only through an exact dated recap card.
+  if (isRecurringMeeting(meeting)) {
+    await appendOperation('GENERIC_DETAILS_SKIPPED_FOR_RECURRING', {
+      meetingId: meeting.id,
+      expectedDate: meeting.dateStamp || ''
+    }, 'INFO');
+    return null;
+  }
+
+  const details = await waitForMeetingDetailsAssets(tabId, meeting, 8000);
+
+  await appendOperation('DETAILS_TRANSCRIPT_LOOKUP', {
+    meetingId: meeting.id,
+    match: !!details?.match,
+    found: details?.found || null,
+    meta: details?.meta || null,
+    actions: details?.actions || {},
+    pageTitle: details?.pageTitle || '',
+    url: details?.url || ''
+  }, details?.found?.transcript ? 'INFO' : 'WARN');
+
+  const actionId = details?.actions?.transcriptActionId;
+  if (!actionId) return null;
+
+  return extractTranscriptAfterAction(
+    tabId,
+    meeting,
+    actionId,
+    0,
+    'DETAILS'
+  );
 }
 
 async function triggerExactActionAndFindRecording(tabId, actionId, meeting) {
@@ -757,23 +883,31 @@ async function discoverRecordingUrls(tabId, meeting) {
   if (isRecordingUrl(tab.url)) return [tab.url];
 
   // Teams can navigate directly from Calendar to the full meeting Details
-  // view. In that page Recording/Transcript are already exposed as assets.
+  // view. Never use generic Details assets for recurring meetings: the page can
+  // display a different occurrence from the calendar item we selected.
   let details = null;
-  try {
-    details = await sendTab(tabId, {
-      type: 'PAGE_FIND_MEETING_DETAILS_ASSETS',
-      meeting
-    }, 5000);
-  } catch (_) {}
+  if (!isRecurringMeeting(meeting)) {
+    try {
+      details = await sendTab(tabId, {
+        type: 'PAGE_FIND_MEETING_DETAILS_ASSETS',
+        meeting
+      }, 5000);
+    } catch (_) {}
 
-  await appendOperation('MEETING_DETAILS_ASSETS', {
-    meetingId: meeting.id,
-    match: !!details?.match,
-    pageTitle: details?.pageTitle || '',
-    url: details?.url || '',
-    found: details?.found || null,
-    actions: details?.actions || {}
-  }, details?.match ? 'INFO' : 'WARN');
+    await appendOperation('MEETING_DETAILS_ASSETS', {
+      meetingId: meeting.id,
+      match: !!details?.match,
+      pageTitle: details?.pageTitle || '',
+      url: details?.url || '',
+      found: details?.found || null,
+      actions: details?.actions || {}
+    }, details?.match ? 'INFO' : 'WARN');
+  } else {
+    await appendOperation('MEETING_DETAILS_ASSETS_SKIPPED_FOR_RECURRING', {
+      meetingId: meeting.id,
+      expectedDate: meeting.dateStamp || ''
+    });
+  }
 
   if (details?.match) {
     const actions = details.actions || {};
@@ -1072,17 +1206,25 @@ async function processMeeting(meeting, index) {
 
     const files = [];
 
-    // Preferred path for the current Teams UI:
-    // Meeting Details -> Transcript -> extract directly from the Teams page.
-    const directFile = await tryExtractTranscriptFromMeetingDetails(
+    // First bind extraction to the exact dated recap card. This is mandatory
+    // for recurring meetings and also protects one-off meetings from stale UI.
+    const exactFiles = await tryExtractTranscriptsFromExactRecap(
       calendarTabId,
       meeting
     );
 
-    if (directFile) {
-      files.push(directFile);
+    if (exactFiles.length) {
+      files.push(...exactFiles);
     } else {
-      const urls = await discoverRecordingUrls(calendarTabId, meeting);
+      const directFile = await tryExtractTranscriptFromMeetingDetails(
+        calendarTabId,
+        meeting
+      );
+
+      if (directFile) {
+        files.push(directFile);
+      } else {
+        const urls = await discoverRecordingUrls(calendarTabId, meeting);
 
       await appendOperation('RECORDING_URLS_RESULT', {
         meetingId: meeting.id,
@@ -1110,6 +1252,7 @@ async function processMeeting(meeting, index) {
 
         const file = await processRecordingUrl(urls[i], meeting, i, null);
         files.push(file);
+      }
       }
     }
 

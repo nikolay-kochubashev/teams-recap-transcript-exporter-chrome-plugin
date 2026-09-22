@@ -2,7 +2,7 @@
   if (window.__teamsRecapTranscriptExporterLoaded) return;
   window.__teamsRecapTranscriptExporterLoaded = true;
 
-  const VERSION = '1.6.1';
+  const VERSION = '1.7.0';
   const state = {
     status: 'idle',
     message: 'Готово к работе.',
@@ -60,28 +60,7 @@
 
   function isScrollable(el) {
     if (!isRendered(el)) return false;
-    const style = getComputedStyle(el);
-    const oy = style.overflowY;
-    const hasScrollableGeometry = el.scrollHeight > el.clientHeight + 40;
-    if (!hasScrollableGeometry) return false;
-
-    // Teams changes the meeting Recap layout depending on viewport width:
-    // - wide: dedicated transcript scroller on the right;
-    // - narrow/responsive: Transcript is below the video and the parent/main
-    //   content area may be the scroll driver.
-    // Programmatic scrolling works for overflow:hidden too, so do not exclude it.
-    if (oy === 'auto' || oy === 'scroll' || oy === 'overlay' || oy === 'hidden') return true;
-
-    // Last-resort page/main-content scroll containers can report overflow:visible.
-    // Keep them as candidates; semantic scoring below decides whether they are
-    // really related to the transcript.
-    return (
-      el === document.scrollingElement ||
-      el === document.documentElement ||
-      el === document.body ||
-      el.getAttribute('role') === 'main' ||
-      el.tagName === 'MAIN'
-    );
+    return el.scrollHeight > el.clientHeight + 40;
   }
 
   const clockTimeRegex = /(?:^|\s)(?:\d{1,2}:)?\d{1,2}:\d{2}(?:\s|$)/g;
@@ -673,6 +652,38 @@
     }
   }
 
+  function probeTranscript() {
+    const candidates = findTranscriptScroller();
+    const best = candidates[0] || null;
+    const bodyText = normalize(document.body?.innerText || document.body?.textContent || '');
+    const transcriptVisible = /AI-generated content may be incorrect|Transcript\. Use arrow keys|\bTranscript\b/i.test(bodyText);
+
+    return {
+      ok: true,
+      url: location.href,
+      title: document.title,
+      isTop: window === window.top,
+      viewport: { width: innerWidth, height: innerHeight },
+      transcriptVisible,
+      bodyChars: bodyText.length,
+      best: best ? {
+        score: best.score,
+        strong: !!best.strong,
+        times: best.times || 0,
+        votes: best.votes || 0,
+        reasons: best.reasons || [],
+        rect: best.rect || null,
+        scroll: best.scroll || {
+          clientHeight: best.el?.clientHeight || 0,
+          scrollHeight: best.el?.scrollHeight || 0,
+          scrollTop: best.el?.scrollTop || 0
+        },
+        overflowY: best.overflowY || getComputedStyle(best.el).overflowY,
+        idClass: best.idClass || ''
+      } : null
+    };
+  }
+
   function buildDiagnostic() {
     const candidates = findTranscriptScroller();
     const visibleText = normalize(document.body.innerText || '').slice(0, 12000);
@@ -681,6 +692,7 @@
       `Version: ${VERSION}`,
       `URL: ${location.href}`,
       `Title: ${document.title}`,
+      `Frame: ${window === window.top ? 'top' : 'child'}`,
       `Viewport: ${innerWidth}x${innerHeight}`,
       `State: ${JSON.stringify({ status: state.status, progress: state.progress, items: state.items, chars: state.chars })}`,
       `LastRun: ${JSON.stringify(lastRunDebug)}`,
@@ -701,6 +713,10 @@
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const type = message?.type;
 
+    if (type === 'PROBE_TRANSCRIPT') {
+      sendResponse(probeTranscript());
+      return;
+    }
     if (type === 'GET_STATE') {
       sendResponse({ ok: true, state: publicState() });
       return;

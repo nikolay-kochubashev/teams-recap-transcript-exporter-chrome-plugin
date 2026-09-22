@@ -1,4 +1,4 @@
-Teams Recap Transcript Exporter v2.1.0
+Teams Recap Transcript Exporter v2.1.1
 
 Назначение
 ----------
@@ -21,7 +21,7 @@ Chrome-расширение для экспорта транскрипций Mic
 
 Side Panel
 ----------
-Начиная с v2.1.0 Side Panel привязан к конкретной вкладке Chrome.
+Начиная с v2.1.0 Side Panel привязан к конкретной вкладке Chrome. В v2.1.1 исправлено открытие tab-scoped панели через toolbar action без потери user gesture.
 
 Как это работает:
 - нажать иконку расширения на нужной вкладке Teams;

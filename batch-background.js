@@ -406,7 +406,7 @@ async function extractRecordingFromTab(tabId, meeting, recordingUrl, recordingIn
   const suffix = recordingIndex > 0
     ? `_${String(recordingIndex + 1).padStart(2, '0')}`
     : '';
-  const fileName = `${sanitizeFileName(state.title || meeting.title || meeting.label)} - ${stamp}${suffix}.txt`;
+  const fileName = `${sanitizeFileName(meeting.title || meeting.label || state.title)} - ${stamp}${suffix}.txt`;
 
   const saved = await nativeMessage({
     action: 'saveTextInFolder',

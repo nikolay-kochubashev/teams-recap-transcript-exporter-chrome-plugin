@@ -713,7 +713,10 @@ async function processMeeting(meeting, index) {
       await appendOperation('OPEN_MEETING_FAILED', {
         meetingId: meeting.id,
         calendarTabId,
-        error: opened?.error || ''
+        error: opened?.error || '',
+        attempts: opened?.attempts || [],
+        diagnostic: opened?.diagnostic || null,
+        target: opened?.target || null
       }, 'ERROR');
       throw new Error(opened?.error || 'Не удалось открыть чат выбранной встречи из Calendar.');
     }

@@ -2,7 +2,7 @@
   if (window.__teamsTranscriptCalendarLoaded) return;
   window.__teamsTranscriptCalendarLoaded = true;
 
-  const VERSION = '2.0.20';
+  const VERSION = '2.0.21';
   let actionMap = new Map();
   let lastCalendarScanDebug = { rejected: [], candidates: [], acceptedCount: 0 };
 

@@ -1,66 +1,119 @@
-Teams Recap Transcript Exporter v1.6.0
+Teams Recap Transcript Exporter v2.1.0
 
-Purpose
--------
-Exports a Microsoft Teams / SharePoint Recap transcript that is visible to you but cannot be downloaded by your account.
-The extension reads the visible lazy-loaded transcript from the page and exports it as TXT.
+Назначение
+----------
+Chrome-расширение для экспорта транскрипций Microsoft Teams / SharePoint Recap, в том числе когда Transcript доступен для просмотра, но кнопка Download недоступна.
 
-Install extension
+Режимы
+------
+1. Текущая встреча
+   - Открыть запись встречи / Recap / Transcript.
+   - Нажать "Собрать транскрипцию".
+   - Экспортировать TXT в Windows Documents.
+
+2. Пакет из календаря
+   - Открыть Teams Web -> Calendar.
+   - Показать нужный диапазон встреч, например неделю.
+   - Открыть Side Panel расширения на этой вкладке.
+   - Нажать "Считать календарь".
+   - Выбрать встречи.
+   - Нажать "Собрать выбранные".
+
+Side Panel
+----------
+Начиная с v2.1.0 Side Panel привязан к конкретной вкладке Chrome.
+
+Как это работает:
+- нажать иконку расширения на нужной вкладке Teams;
+- Side Panel откроется только для этой вкладки;
+- при переключении на другую вкладку панель скрывается;
+- при возврате на рабочую вкладку Teams панель снова доступна;
+- если открыть расширение на другой вкладке того же окна, рабочая вкладка Side Panel переносится туда.
+
+Это устраняет ситуацию, когда панель расширения постоянно отображается на всех вкладках одного окна Chrome.
+
+Пакетный workflow
 -----------------
-1. Extract this ZIP to a permanent folder.
-2. Open chrome://extensions
-3. Enable Developer mode.
-4. Click Load unpacked.
-5. Select the folder teams-recap-transcript-exporter-v1.6.0
-6. Reload the SharePoint / Teams Recap tab.
+Расширение считывает встречи из видимого диапазона Teams Calendar и для каждой выбранной встречи связывает Calendar occurrence с соответствующим Recap/Transcript.
 
-Windows Documents integration (recommended)
--------------------------------------------
-Chrome extensions are still browser-sandboxed and cannot silently write to an arbitrary Windows folder by themselves.
-This package therefore contains a small local Native Messaging helper.
+Основной маршрут:
+Calendar -> конкретная occurrence -> Meeting / Recap -> Transcript -> lazy-loading collector -> TXT.
 
-To enable direct saving to Windows Documents:
-1. Double-click Install-Windows-Integration.cmd once.
-2. Return to chrome://extensions and click Reload on Teams Recap Transcript Exporter.
-3. Reopen the extension side panel.
+Для повторяющихся встреч учитывается конкретная дата и временное окно встречи из Calendar.
 
-No administrator rights are required: the helper is installed for the current Windows user under LocalAppData and HKCU.
+Если внутри одного календарного слота было несколько фактических сессий, например встречу несколько раз запускали и останавливали, экспортируются все Recap/Transcript, пересекающиеся с этим временным окном.
 
-With Windows integration enabled:
-- Save TXT writes directly to the real Windows Documents folder.
-- The filename is: Meeting title - YYYYMMDD.txt
-- Open folder launches Windows Explorer with the saved file selected.
-- Save diagnostics writes a separate diagnostic TXT to Documents and does not replace the transcript shown in the panel.
+Если внутри одной фактической сессии несколько Transcript, экспортируются все найденные Transcript.
 
-Without Windows integration:
-- Save TXT falls back to Chrome's normal Downloads folder.
-- Open folder still shows the downloaded file in Explorer via the Chrome Downloads API.
+Ошибка одной встречи не останавливает весь batch.
 
-Usage
------
-1. Open the meeting recording / Recap in Chrome.
-2. Open Transcript.
-3. Open the extension side panel.
-4. Click Collect transcript.
-5. Wait for 100%.
-6. Click Save TXT.
-7. Click Open folder to show the saved file in Windows Explorer.
+Результат batch
+---------------
+Windows Documents\Teams Transcripts\YYYYMMDD-HHmmss\
 
-Changes in v1.6.0
------------------
-- Fixed transcript collection in responsive/narrow layouts where Transcript moves below the video.
-- Transcript scroller detection is now based primarily on transcript timestamps and semantic proximity, not right-side geometry.
-- Added stronger diagnostics for candidate selection.
-- Can re-detect the transcript scroller if SharePoint rebuilds the responsive DOM during collection.
+Примеры файлов:
+- <Meeting title> - YYYYMMDD.txt
+- <Meeting title> - YYYYMMDD - HHMM-HHMM.txt
+- <Meeting title> - YYYYMMDD - HHMM-HHMM_02.txt
+- batch-report.txt
+- batch-operation-log.txt
 
-Changes in v1.5.0
------------------
-- TXT filename: Meeting title - YYYYMMDD.txt
-- Removed Markdown export.
-- Diagnostics no longer overwrite/disappear from the transcript output. The Diagnostics button now saves a diagnostic TXT directly.
-- Added optional Windows Documents integration through a local Native Messaging helper.
-- Added Open folder, which selects the saved file in Windows Explorer.
+Статусы:
+- DONE - все найденные транскрипции встречи сохранены
+- SKIP - подходящий Recap/Transcript не найден
+- ERROR - встреча найдена, но обработать ее не удалось
 
-Uninstall Windows integration
------------------------------
-Run Uninstall-Windows-Integration.cmd.
+Установка расширения
+--------------------
+1. Открыть chrome://extensions
+2. Включить Developer mode.
+3. Нажать Load unpacked.
+4. Выбрать папку проекта.
+5. После обновления расширения нажать "Обновить" на chrome://extensions.
+6. Обновить вкладки Teams/SharePoint.
+
+После изменения manifest.json вкладки Teams/SharePoint обязательно нужно перезагрузить.
+
+Windows helper
+--------------
+Для пакетного режима Windows helper обязателен.
+
+После перехода с v1.x на v2.x один раз повторно запустить:
+
+Install-Windows-Integration.cmd
+
+Helper работает on-demand: Chrome запускает его только на время файловой операции.
+Он не устанавливается как Windows Service и не висит постоянно в фоне.
+
+Диагностика
+-----------
+При пакетном запуске автоматически создается batch-operation-log.txt.
+
+Лог содержит:
+- распознанную Calendar occurrence;
+- дату и временное окно встречи;
+- найденные Recap-сессии;
+- выбранные Transcript;
+- frame, в котором реально загружена транскрипция;
+- результаты навигации и fallback;
+- ошибки по каждому шагу.
+
+Кнопка "Диагностика календаря" используется, если встречи не определяются или изменилась DOM-разметка Teams.
+
+Техническая архитектура
+-----------------------
+- Manifest V3 Chrome Extension
+- background.js - lifecycle расширения и tab-scoped Side Panel
+- content.js - lazy-loading Transcript collector для Teams / SharePoint frames
+- calendar.js - DOM adapter и UI automation Teams Calendar / Meeting / Recap
+- batch-background.js - batch coordinator и state machine
+- batch-panel.js - UI пакетного режима
+- NativeHost.cs - сохранение файлов в Windows Documents
+- chrome.storage.local - состояние пакетного запуска
+- chrome.storage.session - текущая вкладка-владелец Side Panel
+
+Ограничения
+-----------
+Teams Web не предоставляет стабильный публичный DOM-контракт для Calendar / Meeting / Recap, поэтому адаптер может потребовать обновления при изменениях интерфейса Microsoft.
+
+Текущий batch использует живой DOM вкладки Teams. Chrome может throttling/freeze неактивные вкладки. Переключение на другие вкладки обычно допустимо, но пока не гарантируется полностью resumable-выполнение после freeze/discard вкладки. Архитектура с checkpoint/retry orchestration является отдельным следующим этапом.

@@ -14,7 +14,7 @@ main {
 }
 
 h1 {
-  margin: 0 0 8px;
+  margin: 0 0 10px;
   font-size: 18px;
   font-weight: 650;
 }
@@ -24,6 +24,29 @@ h1 {
   color: #616161;
   font-size: 13px;
   line-height: 1.4;
+}
+
+.mode-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-bottom: 14px;
+  padding: 4px;
+  background: #f2f2f2;
+  border-radius: 8px;
+}
+
+.mode-tab {
+  border: 0;
+  background: transparent;
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.mode-tab.active {
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0,0,0,.12);
+  font-weight: 600;
 }
 
 .actions {
@@ -81,7 +104,8 @@ button:disabled {
   background: #ececec;
 }
 
-#progressBar {
+#progressBar,
+#batchProgressBar {
   width: 0%;
   height: 100%;
   background: #5b5fc7;
@@ -124,4 +148,115 @@ textarea {
   font-size: 12px;
   line-height: 1.35;
   color: #555;
+}
+
+.batch-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 6px;
+  font-size: 12px;
+}
+
+.check-label {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.muted {
+  color: #737373;
+}
+
+.meeting-list {
+  max-height: 330px;
+  overflow: auto;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.meeting-item {
+  display: grid;
+  grid-template-columns: 22px 1fr auto;
+  gap: 8px;
+  padding: 9px 10px;
+  border-bottom: 1px solid #eee;
+  align-items: start;
+}
+
+.meeting-item:last-child {
+  border-bottom: 0;
+}
+
+.meeting-title {
+  font-size: 12px;
+  line-height: 1.35;
+  font-weight: 600;
+}
+
+.meeting-meta {
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.3;
+  color: #666;
+  word-break: break-word;
+}
+
+.meeting-status {
+  font-size: 10px;
+  line-height: 1.3;
+  border-radius: 999px;
+  padding: 3px 7px;
+  background: #f1f1f1;
+  white-space: nowrap;
+}
+
+.meeting-status.done { background: #e8f5e9; }
+.meeting-status.running { background: #e8eafc; }
+.meeting-status.error { background: #fdecec; }
+.meeting-status.skip { background: #fff4d6; }
+
+.empty {
+  padding: 18px 12px;
+  color: #777;
+  text-align: center;
+  font-size: 12px;
+}
+
+.batch-actions {
+  margin-top: 12px;
+}
+
+.batch-log {
+  margin-top: 12px;
+  max-height: 220px;
+  overflow: auto;
+  font: 11px/1.4 Consolas, "Courier New", monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #333;
+}
+
+.meeting-error-detail {
+  margin-top: 5px;
+  font-size: 11px;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.meeting-error-detail.error {
+  color: #a4262c;
+}
+
+.meeting-error-detail.skip {
+  color: #8a5a00;
+}
+
+.version-badge {
+  margin-left: 6px;
+  color: #777;
+  font-size: 11px;
+  font-weight: 500;
 }

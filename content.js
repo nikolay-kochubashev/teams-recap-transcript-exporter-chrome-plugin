@@ -2,7 +2,7 @@
   if (window.__teamsRecapTranscriptExporterLoaded) return;
   window.__teamsRecapTranscriptExporterLoaded = true;
 
-  const VERSION = '1.6.0';
+  const VERSION = '1.7.0';
   const state = {
     status: 'idle',
     message: 'Готово к работе.',
@@ -60,9 +60,7 @@
 
   function isScrollable(el) {
     if (!isRendered(el)) return false;
-    const style = getComputedStyle(el);
-    const oy = style.overflowY;
-    return (oy === 'auto' || oy === 'scroll' || oy === 'overlay') && el.scrollHeight > el.clientHeight + 40;
+    return el.scrollHeight > el.clientHeight + 40;
   }
 
   const clockTimeRegex = /(?:^|\s)(?:\d{1,2}:)?\d{1,2}:\d{2}(?:\s|$)/g;
@@ -134,75 +132,87 @@
     for (const el of document.querySelectorAll('body *')) {
       if (!isScrollable(el)) continue;
       const r = el.getBoundingClientRect();
-      if (r.width < 220 || r.height < 120) continue;
+      if (r.width < 160 || r.height < 80) continue;
 
       const text = normalize(el.innerText || el.textContent || '');
       if (text.length < 20) continue;
 
       let score = 0;
       const reasons = [];
-      const sample = text.slice(0, 16000);
+      const sample = text.slice(0, 24000);
       const times = (sample.match(clockTimeRegex) || []).length;
       const idClass = `${el.id || ''} ${typeof el.className === 'string' ? el.className : ''} ${el.getAttribute('aria-label') || ''}`;
-      const ancestorText = normalize(el.parentElement?.innerText || '').slice(0, 2200);
+      const ancestorText = normalize(el.parentElement?.innerText || '').slice(0, 3200);
       const vote = votes.get(el);
+      const hasAiWarning = /AI-generated content may be incorrect/i.test(sample);
+      const hasTranscriptA11y = /Transcript\. Use arrow keys to navigate between transcript entries/i.test(sample);
+      const hasTranscriptText = transcriptWord.test(sample.slice(0, 3000));
+      const hasStrongTranscriptSignal = hasAiWarning || hasTranscriptA11y || (hasTranscriptText && times >= 1);
 
       if (vote?.count) {
-        score += vote.count * 55;
+        score += vote.count * 65;
         reasons.push(`entry-votes:${vote.count}`);
       }
-      if (transcriptWord.test(idClass)) { score += 130; reasons.push('transcript-id/class'); }
-      if (/Transcript\. Use arrow keys to navigate between transcript entries/i.test(sample)) {
-        score += 240; reasons.push('transcript-a11y');
+      if (transcriptWord.test(idClass)) { score += 150; reasons.push('transcript-id/class'); }
+      if (hasTranscriptA11y) {
+        score += 260; reasons.push('transcript-a11y');
       }
-      if (/AI-generated content may be incorrect/i.test(sample)) {
-        score += 90; reasons.push('ai-warning');
+      if (hasAiWarning) {
+        score += 150; reasons.push('ai-warning');
       }
-      if (transcriptWord.test(sample.slice(0, 1800))) { score += 70; reasons.push('transcript-text'); }
-      if (transcriptWord.test(ancestorText)) { score += 45; reasons.push('transcript-parent'); }
-      if (times >= 2) { score += Math.min(120, times * 10); reasons.push(`times:${times}`); }
+      if (hasTranscriptText) { score += 90; reasons.push('transcript-text'); }
+      if (transcriptWord.test(ancestorText)) { score += 55; reasons.push('transcript-parent'); }
+      if (times >= 1) { score += Math.min(160, times * 14); reasons.push(`times:${times}`); }
 
-      // Semantic proximity to the Transcript heading/tab. This replaces the old
-      // assumption that the transcript must be a narrow panel on the right.
+      // Semantic proximity to the Transcript tab/heading. Geometry is only used
+      // for proximity, not for deciding whether Transcript must be on the right.
       for (const h of headingRects) {
         const dy = r.top - h.bottom;
-        if (dy >= -30 && dy <= 520 && horizontalOverlap(r, h) >= 0.28) {
-          const bonus = dy <= 220 ? 150 : 90;
+        if (dy >= -80 && dy <= 900 && horizontalOverlap(r, h) >= 0.18) {
+          const bonus = dy <= 300 ? 170 : 100;
           score += bonus;
           reasons.push('near-transcript-heading');
           break;
         }
       }
 
+      // A responsive main-content scroller can legitimately contain the video
+      // and the Transcript section at the same time. Penalize it only mildly
+      // when transcript semantics are already present.
       if (el.querySelector('video')) {
-        score -= 500;
+        score -= hasStrongTranscriptSignal ? 35 : 260;
         reasons.push('contains-video');
       }
       if (/\bRecord\b[\s\S]{0,200}\bUpload\b[\s\S]{0,200}\bFavorite\b/i.test(sample.slice(0, 2500))) {
-        score -= 180;
+        score -= hasStrongTranscriptSignal ? 25 : 140;
         reasons.push('page-shell');
       }
       if (!isInViewport(el)) {
-        score -= 20;
+        score -= 10;
         reasons.push('offscreen');
       }
 
-      // Geometry is now only a weak tie-breaker, never a requirement.
-      if (r.left > innerWidth * 0.55) score += 5;
-      if (r.width < innerWidth * 0.55) score += 5;
-      if (el.scrollHeight > el.clientHeight * 1.8) score += 20;
+      if (el.scrollHeight > el.clientHeight * 1.25) score += 20;
+      if (el.scrollHeight > el.clientHeight * 2.0) score += 15;
 
       candidates.push({
         el, score, times, votes: vote?.count || 0, reasons,
+        strong: hasStrongTranscriptSignal,
         rect: { x: r.x, y: r.y, width: r.width, height: r.height },
+        scroll: { clientHeight: el.clientHeight, scrollHeight: el.scrollHeight, scrollTop: el.scrollTop },
+        overflowY: getComputedStyle(el).overflowY,
         idClass
       });
     }
 
-    candidates.sort((a, b) => b.score - a.score || b.votes - a.votes || b.times - a.times);
+    candidates.sort((a, b) =>
+      Number(b.strong) - Number(a.strong) ||
+      b.score - a.score ||
+      b.votes - a.votes ||
+      b.times - a.times
+    );
     return candidates;
   }
-
   const durationOnlyRegex = /^(?:(\d+)\s+hours?\s*)?(?:(\d+)\s+minutes?\s*)?(?:(\d+)\s+seconds?)$/i;
   const clockOnlyRegex = /^(?:\d{1,2}:)?\d{1,2}:\d{2}$/;
   const initialsRegex = /^[A-ZА-ЯЁӘҒҚҢӨҰҮҺІ]{1,3}$/u;
@@ -312,6 +322,22 @@
     return { entries, headerCount: headers.length, rawLines: lines };
   }
 
+  function looksLikeSpeakerDurationLine(line) {
+    const value = normalizeLine(line);
+    return /^[A-ZА-ЯЁӘҒҚҢӨҰҮҺІ][^\d\n]{2,160}\s+\d+\s+(?:hours?|minutes?|seconds?)$/iu.test(value);
+  }
+
+  function contaminationScore(text) {
+    const lines = String(text || '').split(/\r?\n/).map(normalizeLine).filter(Boolean);
+    let score = 0;
+    for (const line of lines) {
+      if (looksLikeSpeakerDurationLine(line)) score += 20;
+      if (/^(?:started|stopped) transcription$/i.test(line)) score += 8;
+      if (/^[\uE000-\uF8FF\s]+$/u.test(line)) score += 5;
+    }
+    return score;
+  }
+
   function mergeEntries(store, newEntries, seqRef) {
     let added = 0;
     for (const entry of newEntries) {
@@ -319,22 +345,50 @@
       const textKey = entry.text.toLowerCase().replace(/\s+/g, ' ').trim();
       const base = `${entry.seconds}|${speakerKey}`;
 
-      let replaced = false;
+      let handled = false;
       for (const [key, existing] of store) {
         if (existing.base !== base) continue;
+
         const oldText = existing.entry.text.toLowerCase().replace(/\s+/g, ' ').trim();
-        if (oldText === textKey) { replaced = true; break; }
+        if (oldText === textKey) {
+          handled = true;
+          break;
+        }
+
+        const oldPenalty = contaminationScore(existing.entry.text);
+        const newPenalty = contaminationScore(entry.text);
+
+        // The virtualized Teams transcript occasionally injects an accessibility
+        // fragment from a distant row into the current row. Prefer the cleaner
+        // duplicate even when it is shorter.
+        if (newPenalty < oldPenalty) {
+          store.delete(key);
+          const newKey = `${base}|${textKey}`;
+          store.set(newKey, { base, seq: existing.seq, entry });
+          handled = true;
+          added++;
+          break;
+        }
+        if (newPenalty > oldPenalty) {
+          handled = true;
+          break;
+        }
+
+        // With equal cleanliness, keep the most complete version of the same row.
         if (textKey.includes(oldText) && textKey.length > oldText.length) {
           store.delete(key);
           const newKey = `${base}|${textKey}`;
           store.set(newKey, { base, seq: existing.seq, entry });
-          replaced = true;
+          handled = true;
           added++;
           break;
         }
-        if (oldText.includes(textKey)) { replaced = true; break; }
+        if (oldText.includes(textKey)) {
+          handled = true;
+          break;
+        }
       }
-      if (replaced) continue;
+      if (handled) continue;
 
       const key = `${base}|${textKey}`;
       if (!store.has(key)) {
@@ -345,10 +399,32 @@
     return added;
   }
 
+  function cleanStoredEntryText(text, speakerSet) {
+    return String(text || '')
+      .split(/\r?\n/)
+      .map(normalizeLine)
+      .filter(Boolean)
+      .filter(line => !speakerSet.has(line))
+      .filter(line => !isNoiseLine(line))
+      .filter(line => !looksLikeSpeakerDurationLine(line))
+      .filter(line => !/^[\uE000-\uF8FF\s]+$/u.test(line))
+      .filter(line => !/^(?:started|stopped) transcription$/i.test(line))
+      .join('\n')
+      .trim();
+  }
+
   function formatEntries(store) {
-    const rows = Array.from(store.values())
-      .sort((a, b) => a.entry.seconds - b.entry.seconds || a.seq - b.seq)
-      .map(x => x.entry);
+    const values = Array.from(store.values())
+      .sort((a, b) => a.entry.seconds - b.entry.seconds || a.seq - b.seq);
+
+    const speakerSet = new Set(values.map(x => normalizeLine(x.entry.speaker)).filter(Boolean));
+    const rows = values
+      .map(x => ({
+        ...x.entry,
+        text: cleanStoredEntryText(x.entry.text, speakerSet)
+      }))
+      .filter(e => e.text);
+
     const text = rows.map(e => `${secondsToClock(e.seconds)}\n${e.speaker}\n${e.text}`).join('\n\n').trim();
     return { rows, text };
   }
@@ -385,11 +461,48 @@
     lastRunDebug = run;
 
     try {
-      const candidates = findTranscriptScroller();
-      const best = candidates[0];
-      if (!best || best.score < 45) throw new Error('Не удалось уверенно определить панель Transcript. Запусти диагностику.');
+      let candidates = [];
+      let best = null;
+      const discoveryStarted = Date.now();
+      while (Date.now() - discoveryStarted < 8000) {
+        candidates = findTranscriptScroller();
+        best = candidates[0] || null;
+        if (best && (best.strong || best.score >= 45)) break;
+        await sleep(250);
+      }
+      if (!best || (!best.strong && best.score < 45)) {
+        run.events.push({
+          event: 'transcript-scroller-not-found',
+          viewport: { width: innerWidth, height: innerHeight },
+          candidates: candidates.slice(0, 8).map(x => ({
+            score: x.score,
+            strong: x.strong,
+            times: x.times,
+            votes: x.votes,
+            reasons: x.reasons,
+            rect: x.rect,
+            scroll: x.scroll,
+            overflowY: x.overflowY,
+            idClass: x.idClass
+          }))
+        });
+        throw new Error('Не удалось уверенно определить область прокрутки Transcript. Запусти диагностику.');
+      }
 
       let scroller = best.el;
+      run.events.push({
+        event: 'transcript-scroller-selected',
+        viewport: { width: innerWidth, height: innerHeight },
+        score: best.score,
+        strong: best.strong,
+        times: best.times,
+        votes: best.votes,
+        reasons: best.reasons,
+        rect: best.rect,
+        scroll: best.scroll,
+        overflowY: best.overflowY,
+        idClass: best.idClass
+      });
       const title = sanitizeFileName(normalize(document.querySelector('h1')?.innerText || document.title || 'teams-transcript'));
       const mediaDuration = getMediaDurationSeconds();
       run.mediaDurationSeconds = mediaDuration;
@@ -442,7 +555,9 @@
 
         if (!scroller.isConnected || scroller.clientHeight < 40) {
           const refreshed = findTranscriptScroller()[0];
-          if (!refreshed || refreshed.score < 45) throw new Error('Панель Transcript была перестроена страницей и не найдена повторно. Запусти диагностику.');
+          if (!refreshed || (!refreshed.strong && refreshed.score < 45)) {
+            throw new Error('Область Transcript была перестроена страницей и не найдена повторно. Запусти диагностику.');
+          }
           scroller = refreshed.el;
           run.events.push({ i: iteration + 1, event: 'scroller-reselected', score: refreshed.score, votes: refreshed.votes || 0, reasons: refreshed.reasons || [] });
         }
@@ -603,6 +718,38 @@
     }
   }
 
+  function probeTranscript() {
+    const candidates = findTranscriptScroller();
+    const best = candidates[0] || null;
+    const bodyText = normalize(document.body?.innerText || document.body?.textContent || '');
+    const transcriptVisible = /AI-generated content may be incorrect|Transcript\. Use arrow keys|\bTranscript\b/i.test(bodyText);
+
+    return {
+      ok: true,
+      url: location.href,
+      title: document.title,
+      isTop: window === window.top,
+      viewport: { width: innerWidth, height: innerHeight },
+      transcriptVisible,
+      bodyChars: bodyText.length,
+      best: best ? {
+        score: best.score,
+        strong: !!best.strong,
+        times: best.times || 0,
+        votes: best.votes || 0,
+        reasons: best.reasons || [],
+        rect: best.rect || null,
+        scroll: best.scroll || {
+          clientHeight: best.el?.clientHeight || 0,
+          scrollHeight: best.el?.scrollHeight || 0,
+          scrollTop: best.el?.scrollTop || 0
+        },
+        overflowY: best.overflowY || getComputedStyle(best.el).overflowY,
+        idClass: best.idClass || ''
+      } : null
+    };
+  }
+
   function buildDiagnostic() {
     const candidates = findTranscriptScroller();
     const visibleText = normalize(document.body.innerText || '').slice(0, 12000);
@@ -611,6 +758,7 @@
       `Version: ${VERSION}`,
       `URL: ${location.href}`,
       `Title: ${document.title}`,
+      `Frame: ${window === window.top ? 'top' : 'child'}`,
       `Viewport: ${innerWidth}x${innerHeight}`,
       `State: ${JSON.stringify({ status: state.status, progress: state.progress, items: state.items, chars: state.chars })}`,
       `LastRun: ${JSON.stringify(lastRunDebug)}`,
@@ -631,6 +779,10 @@
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const type = message?.type;
 
+    if (type === 'PROBE_TRANSCRIPT') {
+      sendResponse(probeTranscript());
+      return;
+    }
     if (type === 'GET_STATE') {
       sendResponse({ ok: true, state: publicState() });
       return;

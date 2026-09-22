@@ -1,0 +1,21 @@
+name: Validate extension
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate manifest
+        run: python -m json.tool manifest.json > /dev/null
+
+      - name: Check JavaScript syntax
+        run: |
+          for file in *.js; do
+            echo "Checking $file"
+            node --check "$file"
+          done

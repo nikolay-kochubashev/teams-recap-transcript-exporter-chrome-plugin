@@ -828,7 +828,43 @@ async function processMeeting(meeting, index) {
       restored: restored.ok,
       url: restored.url || ''
     }, restored.ok ? 'INFO' : 'WARN');
+
+    try { await saveBatchLogs(); } catch (_) {}
   }
+}
+
+function operationLogText() {
+  const lines = [
+    'Teams Recap Transcript Exporter - operation log',
+    `Started: ${batchState.startedAt ? new Date(batchState.startedAt).toISOString() : '-'}`,
+    `Finished: ${batchState.finishedAt ? new Date(batchState.finishedAt).toISOString() : '-'}`,
+    `Folder: ${batchState.folderPath || '-'}`,
+    ''
+  ];
+
+  for (const op of batchState.operationLog || []) {
+    lines.push(`[${op.ts || '-'}] ${op.level || 'INFO'} ${op.step || ''} ${JSON.stringify(op)}`);
+  }
+
+  return lines.join('\n');
+}
+
+async function saveBatchLogs() {
+  if (!batchState.folderPath) return;
+
+  await nativeMessage({
+    action: 'saveTextInFolder',
+    folderPath: batchState.folderPath,
+    fileName: 'batch-report.txt',
+    text: reportText()
+  });
+
+  await nativeMessage({
+    action: 'saveTextInFolder',
+    folderPath: batchState.folderPath,
+    fileName: 'batch-operation-log.txt',
+    text: operationLogText()
+  });
 }
 
 function reportText() {
@@ -901,18 +937,15 @@ async function runBatch() {
         : 'Пакетный сбор завершен.'
     });
 
-    await nativeMessage({
-      action: 'saveTextInFolder',
-      folderPath: batchState.folderPath,
-      fileName: 'batch-report.txt',
-      text: reportText()
-    });
+    await saveBatchLogs();
   } catch (e) {
+    await appendOperation('BATCH_ERROR', { error: e?.message || String(e) }, 'ERROR');
     await patchBatch({
       status: 'error',
       finishedAt: Date.now(),
       message: e?.message || String(e)
     });
+    try { await saveBatchLogs(); } catch (_) {}
   } finally {
     runPromise = null;
   }

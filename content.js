@@ -322,6 +322,22 @@
     return { entries, headerCount: headers.length, rawLines: lines };
   }
 
+  function looksLikeSpeakerDurationLine(line) {
+    const value = normalizeLine(line);
+    return /^[A-ZА-ЯЁӘҒҚҢӨҰҮҺІ][^\d\n]{2,160}\s+\d+\s+(?:hours?|minutes?|seconds?)$/iu.test(value);
+  }
+
+  function contaminationScore(text) {
+    const lines = String(text || '').split(/\r?\n/).map(normalizeLine).filter(Boolean);
+    let score = 0;
+    for (const line of lines) {
+      if (looksLikeSpeakerDurationLine(line)) score += 20;
+      if (/^(?:started|stopped) transcription$/i.test(line)) score += 8;
+      if (/^[\uE000-\uF8FF\s]+$/u.test(line)) score += 5;
+    }
+    return score;
+  }
+
   function mergeEntries(store, newEntries, seqRef) {
     let added = 0;
     for (const entry of newEntries) {
@@ -329,22 +345,50 @@
       const textKey = entry.text.toLowerCase().replace(/\s+/g, ' ').trim();
       const base = `${entry.seconds}|${speakerKey}`;
 
-      let replaced = false;
+      let handled = false;
       for (const [key, existing] of store) {
         if (existing.base !== base) continue;
+
         const oldText = existing.entry.text.toLowerCase().replace(/\s+/g, ' ').trim();
-        if (oldText === textKey) { replaced = true; break; }
+        if (oldText === textKey) {
+          handled = true;
+          break;
+        }
+
+        const oldPenalty = contaminationScore(existing.entry.text);
+        const newPenalty = contaminationScore(entry.text);
+
+        // The virtualized Teams transcript occasionally injects an accessibility
+        // fragment from a distant row into the current row. Prefer the cleaner
+        // duplicate even when it is shorter.
+        if (newPenalty < oldPenalty) {
+          store.delete(key);
+          const newKey = `${base}|${textKey}`;
+          store.set(newKey, { base, seq: existing.seq, entry });
+          handled = true;
+          added++;
+          break;
+        }
+        if (newPenalty > oldPenalty) {
+          handled = true;
+          break;
+        }
+
+        // With equal cleanliness, keep the most complete version of the same row.
         if (textKey.includes(oldText) && textKey.length > oldText.length) {
           store.delete(key);
           const newKey = `${base}|${textKey}`;
           store.set(newKey, { base, seq: existing.seq, entry });
-          replaced = true;
+          handled = true;
           added++;
           break;
         }
-        if (oldText.includes(textKey)) { replaced = true; break; }
+        if (oldText.includes(textKey)) {
+          handled = true;
+          break;
+        }
       }
-      if (replaced) continue;
+      if (handled) continue;
 
       const key = `${base}|${textKey}`;
       if (!store.has(key)) {
@@ -355,10 +399,32 @@
     return added;
   }
 
+  function cleanStoredEntryText(text, speakerSet) {
+    return String(text || '')
+      .split(/\r?\n/)
+      .map(normalizeLine)
+      .filter(Boolean)
+      .filter(line => !speakerSet.has(line))
+      .filter(line => !isNoiseLine(line))
+      .filter(line => !looksLikeSpeakerDurationLine(line))
+      .filter(line => !/^[\uE000-\uF8FF\s]+$/u.test(line))
+      .filter(line => !/^(?:started|stopped) transcription$/i.test(line))
+      .join('\n')
+      .trim();
+  }
+
   function formatEntries(store) {
-    const rows = Array.from(store.values())
-      .sort((a, b) => a.entry.seconds - b.entry.seconds || a.seq - b.seq)
-      .map(x => x.entry);
+    const values = Array.from(store.values())
+      .sort((a, b) => a.entry.seconds - b.entry.seconds || a.seq - b.seq);
+
+    const speakerSet = new Set(values.map(x => normalizeLine(x.entry.speaker)).filter(Boolean));
+    const rows = values
+      .map(x => ({
+        ...x.entry,
+        text: cleanStoredEntryText(x.entry.text, speakerSet)
+      }))
+      .filter(e => e.text);
+
     const text = rows.map(e => `${secondsToClock(e.seconds)}\n${e.speaker}\n${e.text}`).join('\n\n').trim();
     return { rows, text };
   }

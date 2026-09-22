@@ -2,7 +2,7 @@
   if (window.__teamsTranscriptCalendarLoaded) return;
   window.__teamsTranscriptCalendarLoaded = true;
 
-  const VERSION = '2.0.15';
+  const VERSION = '2.0.16';
   let actionMap = new Map();
   let lastCalendarScanDebug = { rejected: [], candidates: [], acceptedCount: 0 };
 
@@ -384,19 +384,42 @@
 
     const titleText = normalizedComparable(document.title || '');
     const bodyText = normalizedComparable(
-      (document.body?.innerText || document.body?.textContent || '').slice(0, 8000)
+      (document.body?.innerText || document.body?.textContent || '').slice(0, 12000)
     );
 
-    if (!titleText.includes(expected) && !bodyText.includes(expected)) return false;
+    const titleMatches = titleText.includes(expected);
+    const bodyMatches = bodyText.includes(expected);
+    if (!titleMatches && !bodyMatches) return false;
 
-    const hasDetailsSignals = Array.from(document.querySelectorAll(
+    const controls = Array.from(document.querySelectorAll(
       'button,a,[role="button"],[role="link"],[role="tab"],[tabindex]'
     ))
       .filter(isRendered)
       .map(interactiveText)
-      .some(text => /^(?:details|recap|recording|transcript|close)$/i.test(text));
+      .filter(Boolean);
 
-    return hasDetailsSignals;
+    const hasDetailsSignals = controls.some(text =>
+      /^(?:details|recap|recording|transcript|close)$/i.test(text)
+    );
+
+    if (hasDetailsSignals) return true;
+
+    // New Teams can navigate from a Calendar card to a full meeting page without
+    // rendering a control literally called "Details". The strongest signal is:
+    // the selected meeting title is now the page title, and visible Calendar cards
+    // disappeared. This also avoids accepting the stale browser title after we
+    // navigate back to Calendar.
+    const hasVisibleCalendarCards = Array.from(document.querySelectorAll(
+      '[data-testid="calendar-in-day-event-card"]'
+    )).some(isRendered);
+
+    if (titleMatches && !hasVisibleCalendarCards) return true;
+
+    const hasMeetingSignals = controls.some(text =>
+      /^(?:join|show join info|meeting info|meeting options|attendance|chat)$/i.test(text)
+    );
+
+    return !hasVisibleCalendarCards && bodyMatches && hasMeetingSignals;
   }
 
   function clickableAncestor(el, maxDepth = 6) {
@@ -584,13 +607,28 @@
       .filter(isRendered)
       .map(el => normalize(el.innerText || el.textContent || '').slice(0, 1200));
 
+    const visibleMeetingCards = Array.from(
+      document.querySelectorAll('[data-testid="calendar-in-day-event-card"]')
+    ).filter(isRendered).length;
+
+    const controls = Array.from(document.querySelectorAll(
+      'button,a,[role="button"],[role="link"],[role="tab"],[tabindex]'
+    ))
+      .filter(isRendered)
+      .map(interactiveText)
+      .filter(Boolean)
+      .slice(0, 80);
+
     return {
       expectedTitle: meeting?.title || '',
       documentTitle: document.title,
       url: location.href,
+      visibleMeetingCards,
+      detailsMatch: meetingDetailsViewMatches(meeting),
       peekCount: peeks.length,
       peeks,
-      chatCandidates
+      chatCandidates,
+      controls
     };
   }
 
@@ -774,19 +812,80 @@
     return { min: dates[0], max: dates[dates.length - 1], columns: dates };
   }
 
+  function calendarToolbarNavigationByGeometry(kind, els) {
+    if (kind !== 'previous' && kind !== 'next') return null;
+
+    const today = els.find(el => {
+      const text = normalize(`${accessibleText(el)} ${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''}`);
+      return /^(?:today|сегодня)(?:\s|$)/i.test(text);
+    });
+    if (!today) return null;
+
+    const tr = today.getBoundingClientRect();
+    const ty = tr.top + tr.height / 2;
+
+    // In Teams Web the two date-range arrows are the first two compact buttons
+    // immediately to the right of Today. Their accessible names can be empty.
+    const nearby = els
+      .filter(el => el !== today)
+      .map(el => ({ el, r: el.getBoundingClientRect() }))
+      .filter(x => {
+        const cy = x.r.top + x.r.height / 2;
+        return (
+          x.r.left >= tr.right - 2 &&
+          x.r.left <= tr.right + 190 &&
+          Math.abs(cy - ty) <= 26 &&
+          x.r.width > 12 && x.r.width <= 64 &&
+          x.r.height > 12 && x.r.height <= 64
+        );
+      })
+      .sort((a, b) => a.r.left - b.r.left);
+
+    if (nearby.length < 2) return null;
+    return kind === 'previous' ? nearby[0].el : nearby[1].el;
+  }
+
+  function calendarNavDiagnostic(els = null) {
+    const controls = els || Array.from(
+      document.querySelectorAll('button,[role="button"],a[href],[tabindex]')
+    ).filter(isRendered);
+
+    return controls.slice(0, 80).map(el => {
+      const r = el.getBoundingClientRect();
+      return {
+        text: accessibleText(el),
+        aria: el.getAttribute('aria-label') || '',
+        title: el.getAttribute('title') || '',
+        tid: el.getAttribute('data-tid') || el.getAttribute('data-testid') || '',
+        rect: {
+          left: Math.round(r.left),
+          top: Math.round(r.top),
+          width: Math.round(r.width),
+          height: Math.round(r.height)
+        }
+      };
+    });
+  }
+
   function findCalendarNavControl(kind) {
-    const els = Array.from(document.querySelectorAll('button,[role="button"],a[href],[tabindex]')).filter(isRendered);
+    const els = Array.from(
+      document.querySelectorAll('button,[role="button"],a[href],[tabindex]')
+    ).filter(isRendered);
+
     const patterns = kind === 'calendar'
       ? [/^calendar(?:\s*\([^)]*\))?$/i, /calendar/i]
       : kind === 'previous'
-        ? [/previous\s*(?:week|period|date)?/i, /предыдущ/i, /назад/i]
-        : [/next\s*(?:week|period|date)?/i, /следующ/i, /впер[её]д/i, /далее/i];
+        ? [/previous/i, /prev/i, /предыдущ/i, /назад/i]
+        : [/next/i, /следующ/i, /впер[её]д/i, /далее/i];
 
-    return els.find(el => {
+    const semantic = els.find(el => {
       const text = accessibleText(el);
       const tid = normalize(`${el.getAttribute('data-tid') || ''} ${el.getAttribute('data-testid') || ''} ${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''}`);
       return patterns.some(re => re.test(text) || re.test(tid));
-    }) || null;
+    });
+    if (semantic) return semantic;
+
+    return calendarToolbarNavigationByGeometry(kind, els);
   }
 
   async function navigateToCalendar() {
@@ -836,16 +935,44 @@
       const direction = targetUtc < range.min.utc ? 'previous' : 'next';
       const button = findCalendarNavControl(direction);
       if (!button) {
-        return { ok: false, error: `Calendar ${direction} control not found.` };
+        return {
+          ok: false,
+          error: `Calendar ${direction} control not found.`,
+          currentRange: {
+            from: toDateStamp(range.min),
+            to: toDateStamp(range.max)
+          },
+          navDiagnostic: calendarNavDiagnostic()
+        };
       }
 
+      const beforeKey = `${toDateStamp(range.min)}|${toDateStamp(range.max)}`;
       try { button.click(); } catch (_) {
-        button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window, button: 0 }));
+        dispatchPointerSequence(button);
       }
-      await sleep(650);
+
+      // Do not rely on a fixed sleep. Teams updates the Calendar grid
+      // asynchronously and the old week can remain in DOM for a while.
+      const waitStarted = Date.now();
+      while (Date.now() - waitStarted < 3500) {
+        await sleep(140);
+        const nextRange = visibleCalendarRange();
+        if (!nextRange) continue;
+        const nextKey = `${toDateStamp(nextRange.min)}|${toDateStamp(nextRange.max)}`;
+        if (nextKey !== beforeKey) break;
+      }
     }
 
-    return { ok: false, error: 'Unable to navigate Calendar to the meeting week.' };
+    const finalRange = visibleCalendarRange();
+    return {
+      ok: false,
+      error: 'Unable to navigate Calendar to the meeting week.',
+      currentRange: finalRange ? {
+        from: toDateStamp(finalRange.min),
+        to: toDateStamp(finalRange.max)
+      } : null,
+      navDiagnostic: calendarNavDiagnostic()
+    };
   }
 
   function recapCardContext(card) {

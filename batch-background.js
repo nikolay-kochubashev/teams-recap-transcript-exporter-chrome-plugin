@@ -1,5 +1,5 @@
 const NATIVE_HOST = 'com.openai.teams_recap_transcript_exporter';
-const BATCH_KEY = 'teamsTranscriptBatchStateV3';
+const BATCH_KEY = 'teamsTranscriptBatchStateV4';
 
 let stopRequested = false;
 let runPromise = null;
@@ -360,45 +360,101 @@ async function processRecordingUrl(url, meeting, index, reuseTabId = null) {
   }
 }
 
+async function findMeetingScopedActionsWithWait(tabId, meeting, timeoutMs = 8000) {
+  const started = Date.now();
+  let last = { ok: true, actions: [], context: null };
+
+  while (Date.now() - started < timeoutMs) {
+    try {
+      last = await sendTab(tabId, {
+        type: 'PAGE_FIND_MEETING_ACTIONS',
+        meeting
+      }, 3500);
+
+      if ((last?.actions || []).length) return last;
+    } catch (_) {}
+
+    await delay(450);
+  }
+
+  return last;
+}
+
+function conversationMatchesMeeting(context, meeting) {
+  const actual = normalizeMeetingKey(context?.conversationTitle || '');
+  const expected = normalizeMeetingKey(meeting?.title || '');
+
+  if (!actual) return { ok: true, uncertain: true };
+  if (!expected) return { ok: false, actual, expected };
+
+  const ok = actual === expected || actual.includes(expected) || expected.includes(actual);
+  return { ok, actual, expected, uncertain: false };
+}
+
+async function validateMeetingConversation(tabId, meeting) {
+  const response = await sendTab(tabId, { type: 'PAGE_GET_CONTEXT' }, 5000);
+  const verdict = conversationMatchesMeeting(response?.context, meeting);
+
+  await appendOperation('MEETING_CONTEXT_CHECK', {
+    meetingId: meeting?.id,
+    expectedTitle: meeting?.title || '',
+    actualTitle: response?.context?.conversationTitle || '',
+    pageKind: response?.context?.pageKind || '',
+    url: response?.context?.url || '',
+    ok: verdict.ok,
+    uncertain: !!verdict.uncertain
+  }, verdict.ok ? 'INFO' : 'ERROR');
+
+  return { ...verdict, context: response?.context || null };
+}
+
 async function discoverRecordingUrls(tabId, meeting) {
   let tab = await chrome.tabs.get(tabId);
+
   await appendOperation('DISCOVER_RECORDING_START', {
     tabId,
     url: tab.url,
     meetingId: meeting?.id,
-    meetingDate: meeting?.dateStamp || ''
+    meetingDate: meeting?.dateStamp || '',
+    meetingTitle: meeting?.title || ''
   });
 
   if (isRecordingUrl(tab.url)) return [tab.url];
 
-  let page = await findActionsWithWait(tabId, 6500);
-  await appendOperation('DISCOVER_ACTIONS', {
-    tabId,
-    url: tab.url,
-    actions: (page.actions || []).map(a => ({ kind: a.kind, label: a.label, href: a.href || '' })).slice(0, 50),
-    recordingLinks: (page.recordingLinks || []).slice(0, 20)
+  let scoped = await findMeetingScopedActionsWithWait(tabId, meeting, 7000);
+
+  await appendOperation('MEETING_SCOPED_ACTIONS', {
+    meetingId: meeting?.id,
+    context: scoped?.context || null,
+    actions: (scoped?.actions || []).map(a => ({
+      kind: a.kind,
+      label: a.label,
+      href: a.href || ''
+    }))
   });
 
-  let urls = (page.recordingLinks || []).map(x => x.href).filter(Boolean);
-  if (urls.length) return [...new Set(urls)];
+  const scopedActions = scoped?.actions || [];
 
-  // Resolve direct Recap/Recording hrefs outside the Calendar anchor tab.
-  for (const action of (page.actions || []).filter(a => ['recap', 'recording'].includes(a.kind) && a.href)) {
+  for (const action of scopedActions.filter(a =>
+    ['recording', 'recap'].includes(a.kind) && a.href
+  )) {
     const resolved = await resolveHrefForRecordings(action.href, meeting);
     if (resolved.length) return resolved;
   }
 
-  // A meeting details page can expose a clickable Recap without an href.
-  const clickableDirect = (page.actions || []).find(a =>
-    ['recap', 'recording'].includes(a.kind) && !a.href
+  const directButton = scopedActions.find(a =>
+    ['recording', 'recap'].includes(a.kind) && !a.href
   );
-  if (clickableDirect) {
-    const nav = await triggerActionAndCaptureNewTabs(tabId, clickableDirect.id);
+
+  if (directButton) {
+    const nav = await triggerActionAndCaptureNewTabs(tabId, directButton.id);
 
     for (const created of nav.created || []) {
       if (isRecordingUrl(created.url)) return [created.url];
+
       const resolved = await resolveHrefForRecordings(created.url, meeting);
       if (resolved.length) return resolved;
+
       if (/^(chrome|about):/i.test(created.url || '') || !created.url) {
         try { await chrome.tabs.remove(created.id); } catch (_) {}
       }
@@ -407,30 +463,58 @@ async function discoverRecordingUrls(tabId, meeting) {
     tab = nav.current;
     if (isRecordingUrl(tab.url)) return [tab.url];
 
-    page = await findActionsWithWait(tabId, 8000);
-    urls = (page.recordingLinks || []).map(x => x.href).filter(Boolean);
-    if (urls.length) return [...new Set(urls)];
+    const contextCheck = await validateMeetingConversation(tabId, meeting);
+    if (!contextCheck.ok) {
+      throw new Error(
+        'Открылся другой чат/Recap: "' +
+        (contextCheck.context?.conversationTitle || 'неизвестно') +
+        '" вместо "' + meeting.title + '".'
+      );
+    }
   }
 
-  // Fall back to Meeting Chat.
-  page = await findActionsWithWait(tabId, 5000);
-  const chatAction = (page.actions || []).find(a => a.kind === 'chat');
+  if (!directButton) {
+    scoped = await findMeetingScopedActionsWithWait(tabId, meeting, 3500);
+  }
+
+  const chatAction = (scoped?.actions || []).find(a => a.kind === 'chat');
+
   if (chatAction) {
     if (chatAction.href) {
       const resolved = await resolveHrefForRecordings(chatAction.href, meeting);
       if (resolved.length) return resolved;
+
+      if (/teams\.(?:microsoft\.com|cloud\.microsoft)/i.test(chatAction.href)) {
+        await chrome.tabs.update(tabId, { url: chatAction.href, active: false });
+        await waitTabComplete(tabId, 30000);
+        await delay(1200);
+      }
     } else {
       await triggerActionAndCaptureNewTabs(tabId, chatAction.id);
       await delay(1400);
     }
+
+    const contextCheck = await validateMeetingConversation(tabId, meeting);
+    if (!contextCheck.ok) {
+      throw new Error(
+        'Открылся другой чат: "' +
+        (contextCheck.context?.conversationTitle || 'неизвестно') +
+        '" вместо "' + meeting.title + '".'
+      );
+    }
+  } else if (!directButton) {
+    await appendOperation('MEETING_CHAT_NOT_FOUND', {
+      meetingId: meeting?.id,
+      title: meeting?.title || ''
+    }, 'WARN');
+    return [];
   }
 
   tab = await chrome.tabs.get(tabId);
   if (isRecordingUrl(tab.url)) return [tab.url];
 
-  // Recurring chats contain recap cards for many dates. Match the selected
-  // Calendar occurrence by date instead of taking the first View recap.
   const recapCards = await waitForRecapCards(tabId, meeting?.dateStamp, 15000);
+
   await appendOperation('RECAP_CARDS_RESULT', {
     meetingId: meeting?.id,
     meetingDate: meeting?.dateStamp || '',
@@ -438,35 +522,47 @@ async function discoverRecordingUrls(tabId, meeting) {
     cards: recapCards.slice(0, 20)
   });
 
-  if (recapCards.length) {
-    const card = recapCards[0];
+  if (!recapCards.length) return [];
 
-    if (card.href) {
-      const resolved = await resolveHrefForRecordings(card.href, meeting);
+  const card = recapCards[0];
+
+  if (card.href) {
+    const resolved = await resolveHrefForRecordings(card.href, meeting);
+    if (resolved.length) return resolved;
+  } else {
+    const nav = await triggerActionAndCaptureNewTabs(tabId, card.id);
+
+    for (const created of nav.created || []) {
+      if (isRecordingUrl(created.url)) return [created.url];
+
+      const resolved = await resolveHrefForRecordings(created.url, meeting);
       if (resolved.length) return resolved;
-    } else {
-      const nav = await triggerActionAndCaptureNewTabs(tabId, card.id);
 
-      for (const created of nav.created || []) {
-        if (isRecordingUrl(created.url)) return [created.url];
-        const resolved = await resolveHrefForRecordings(created.url, meeting);
-        if (resolved.length) return resolved;
-        if (/^(chrome|about):/i.test(created.url || '') || !created.url) {
-          try { await chrome.tabs.remove(created.id); } catch (_) {}
-        }
+      if (/^(chrome|about):/i.test(created.url || '') || !created.url) {
+        try { await chrome.tabs.remove(created.id); } catch (_) {}
       }
+    }
 
-      tab = nav.current;
-      if (isRecordingUrl(tab.url)) return [tab.url];
+    tab = nav.current;
+    if (isRecordingUrl(tab.url)) return [tab.url];
 
-      page = await findActionsWithWait(tabId, 12000);
-      urls = (page.recordingLinks || []).map(x => x.href).filter(Boolean);
-      if (urls.length) return [...new Set(urls)];
+    const contextCheck = await validateMeetingConversation(tabId, meeting);
+    if (!contextCheck.ok) {
+      throw new Error(
+        'После View recap открыт другой контекст: "' +
+        (contextCheck.context?.conversationTitle || 'неизвестно') + '".'
+      );
+    }
 
-      for (const action of (page.actions || []).filter(a => ['recap', 'recording'].includes(a.kind) && a.href)) {
-        const resolved = await resolveHrefForRecordings(action.href, meeting);
-        if (resolved.length) return resolved;
-      }
+    const page = await findActionsWithWait(tabId, 10000);
+    const urls = (page?.recordingLinks || []).map(x => x.href).filter(Boolean);
+    if (urls.length) return [...new Set(urls)];
+
+    for (const action of (page?.actions || []).filter(a =>
+      a.kind === 'recording' && a.href
+    )) {
+      const resolved = await resolveHrefForRecordings(action.href, meeting);
+      if (resolved.length) return resolved;
     }
   }
 

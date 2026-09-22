@@ -2,7 +2,7 @@
   if (window.__teamsTranscriptCalendarLoaded) return;
   window.__teamsTranscriptCalendarLoaded = true;
 
-  const VERSION = '2.0.5';
+  const VERSION = '2.0.7';
   let actionMap = new Map();
   let lastCalendarScanDebug = { rejected: [], candidates: [], acceptedCount: 0 };
 
@@ -75,6 +75,35 @@
       month: monthNumber(m[2]),
       year: Number(m[3] || fallbackYear || 0)
     };
+  }
+
+  function parseFlexibleDate(text, fallbackYear) {
+    const value = normalize(text);
+    const dayFirst = parseNamedDate(value, fallbackYear);
+    if (dayFirst) return dayFirst;
+
+    const re = new RegExp('\\b(' + monthPattern + ')\\s+(\\d{1,2})(?:,)?(?:\\s+(20\\d{2}))?\\b', 'i');
+    const m = value.match(re);
+    if (!m) return null;
+    return {
+      day: Number(m[2]),
+      month: monthNumber(m[1]),
+      year: Number(m[3] || fallbackYear || 0)
+    };
+  }
+
+  function parseDateStampParts(stamp) {
+    if (!/^\\d{8}$/.test(String(stamp || ''))) return null;
+    return {
+      year: Number(stamp.slice(0, 4)),
+      month: Number(stamp.slice(4, 6)),
+      day: Number(stamp.slice(6, 8))
+    };
+  }
+
+  function datePartsToUtc(parts) {
+    if (!parts?.year || !parts?.month || !parts?.day) return NaN;
+    return Date.UTC(parts.year, parts.month - 1, parts.day);
   }
 
   function parseStartTime(text) {
@@ -249,7 +278,7 @@
     for (const item of raw) {
       const label = item.text;
       const parentText = normalize(item.el.parentElement?.innerText || '').slice(0, 1000);
-      const explicitDate = parseNamedDate(`${label} ${parentText}`, calendarContext?.year);
+      const explicitDate = parseFlexibleDate(`${label} ${parentText}`, calendarContext?.year);
       const inferredDate = explicitDate || inferDateFromColumn(item.r, dayColumns);
       const startTime = parseStartTime(`${label} ${parentText}`);
       const dateStamp = toDateStamp(inferredDate);
@@ -361,6 +390,130 @@
     };
   }
 
+  function visibleCalendarRange() {
+    const columns = getVisibleDayColumns();
+    if (!columns.length) return null;
+    const dates = columns
+      .map(x => ({ ...x, utc: datePartsToUtc(x) }))
+      .filter(x => Number.isFinite(x.utc))
+      .sort((a, b) => a.utc - b.utc);
+    if (!dates.length) return null;
+    return { min: dates[0], max: dates[dates.length - 1], columns: dates };
+  }
+
+  function findCalendarNavControl(kind) {
+    const els = Array.from(document.querySelectorAll('button,[role="button"],a[href],[tabindex]')).filter(isRendered);
+    const patterns = kind === 'calendar'
+      ? [/^calendar(?:\s*\([^)]*\))?$/i, /calendar/i]
+      : kind === 'previous'
+        ? [/previous\s*(?:week|period|date)?/i, /предыдущ/i, /назад/i]
+        : [/next\s*(?:week|period|date)?/i, /следующ/i, /впер[её]д/i, /далее/i];
+
+    return els.find(el => {
+      const text = accessibleText(el);
+      const tid = normalize(`${el.getAttribute('data-tid') || ''} ${el.getAttribute('data-testid') || ''} ${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''}`);
+      return patterns.some(re => re.test(text) || re.test(tid));
+    }) || null;
+  }
+
+  async function navigateToCalendar() {
+    if (visibleCalendarRange()) return { ok: true, alreadyThere: true };
+
+    const control = findCalendarNavControl('calendar');
+    if (!control) return { ok: false, error: 'Calendar navigation control not found.' };
+
+    try { control.click(); } catch (_) {
+      control.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window, button: 0 }));
+    }
+
+    for (let i = 0; i < 30; i++) {
+      await sleep(300);
+      if (visibleCalendarRange()) return { ok: true, alreadyThere: false };
+    }
+    return { ok: false, error: 'Calendar did not become ready.' };
+  }
+
+  async function ensureCalendarDate(dateStamp) {
+    const target = parseDateStampParts(dateStamp);
+    if (!target) return { ok: false, error: 'Meeting date is unavailable.' };
+
+    const nav = await navigateToCalendar();
+    if (!nav.ok) return nav;
+
+    const targetUtc = datePartsToUtc(target);
+
+    for (let attempt = 0; attempt < 24; attempt++) {
+      const range = visibleCalendarRange();
+      if (!range) {
+        await sleep(350);
+        continue;
+      }
+
+      if (targetUtc >= range.min.utc && targetUtc <= range.max.utc) {
+        return {
+          ok: true,
+          range: {
+            from: toDateStamp(range.min),
+            to: toDateStamp(range.max)
+          },
+          attempts: attempt
+        };
+      }
+
+      const direction = targetUtc < range.min.utc ? 'previous' : 'next';
+      const button = findCalendarNavControl(direction);
+      if (!button) {
+        return { ok: false, error: `Calendar ${direction} control not found.` };
+      }
+
+      try { button.click(); } catch (_) {
+        button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window, button: 0 }));
+      }
+      await sleep(650);
+    }
+
+    return { ok: false, error: 'Unable to navigate Calendar to the meeting week.' };
+  }
+
+  function findRecapCards() {
+    actionMap = new Map();
+    const result = [];
+    let seq = 0;
+    const buttons = Array.from(document.querySelectorAll('button,[role="button"],a[href]')).filter(isRendered);
+
+    for (const button of buttons) {
+      const label = accessibleText(button);
+      if (!/view\s+recap|recap/i.test(label)) continue;
+
+      let card = button;
+      for (let depth = 0; depth < 7 && card?.parentElement; depth++) {
+        const parent = card.parentElement;
+        const text = normalize(parent.innerText || parent.textContent || '');
+        if (/\bTranscript\b/i.test(text) && timeRegex.test(text) && text.length < 2200) {
+          card = parent;
+          break;
+        }
+        card = parent;
+      }
+
+      const cardText = normalize(card?.innerText || card?.textContent || label);
+      const date = parseFlexibleDate(cardText, currentCalendarMonthYear()?.year);
+      const dateStamp = toDateStamp(date);
+      const id = `recap-${++seq}-${hash(`${dateStamp}|${cardText}`)}`;
+      actionMap.set(id, button);
+
+      result.push({
+        id,
+        kind: 'recap-card',
+        label,
+        dateStamp,
+        text: cardText.slice(0, 900),
+        href: button.href || button.closest('a[href]')?.href || ''
+      });
+    }
+    return result;
+  }
+
   function classifyAction(label, href) {
     const text = `${label || ''} ${href || ''}`.toLowerCase();
     if (/recap|meeting recap|summary/.test(text)) return 'recap';
@@ -427,6 +580,7 @@
     const meetings = scanCalendarMeetings();
     const actions = findActions();
     const links = findRecordingLinks();
+    const recapCards = findRecapCards();
     const lines = [
       'Teams Recap Transcript Exporter Calendar diagnostic',
       `Version: ${VERSION}`,
@@ -454,6 +608,8 @@
 
     lines.push('', `Actions found: ${actions.length}`);
     actions.forEach((a, i) => lines.push(`[A${i + 1}] kind=${a.kind} label=${a.label} href=${a.href || '-'}`));
+    lines.push('', `Recap cards found: ${recapCards.length}`);
+    recapCards.forEach((x, i) => lines.push(`[RC${i + 1}] date=${x.dateStamp || '-'} label=${x.label} text=${x.text}`));
     lines.push('', `Recording links found: ${links.length}`);
     links.forEach((l, i) => lines.push(`[R${i + 1}] kind=${l.kind} label=${l.label} href=${l.href}`));
     lines.push('', 'Visible page text sample:', normalize(document.body?.innerText || '').slice(0, 14000));
@@ -470,6 +626,14 @@
     if (type === 'CALENDAR_OPEN_MEETING') {
       openCalendarMeeting(message.meeting).then(sendResponse);
       return true;
+    }
+    if (type === 'CALENDAR_ENSURE_DATE') {
+      ensureCalendarDate(message.dateStamp).then(sendResponse);
+      return true;
+    }
+    if (type === 'PAGE_FIND_RECAP_CARDS') {
+      sendResponse({ ok: true, cards: findRecapCards(), url: location.href, pageKind: pageKind() });
+      return;
     }
     if (type === 'CALENDAR_FIND_ACTIONS' || type === 'PAGE_FIND_ACTIONS') {
       sendResponse({ ok: true, actions: findActions(), recordingLinks: findRecordingLinks(), pageKind: pageKind(), url: location.href });

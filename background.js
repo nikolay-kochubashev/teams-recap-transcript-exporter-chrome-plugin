@@ -31,34 +31,46 @@ async function saveSidePanelOwners(owners) {
   }
 }
 
-async function bindSidePanelToTab(tab) {
-  if (!tab?.id || !tab?.windowId) return;
+function bindSidePanelToTab(tab) {
+  if (!tab?.id || !tab?.windowId) return Promise.resolve();
 
-  const owners = await getSidePanelOwners();
-  const windowKey = String(tab.windowId);
-  const previousTabId = Number(owners[windowKey] || 0);
-
-  if (previousTabId && previousTabId !== tab.id) {
-    try {
-      await chrome.sidePanel.setOptions({
-        tabId: previousTabId,
-        enabled: false
-      });
-    } catch (_) {
-      // The previous tab may already be closed.
-    }
-  }
-
-  await chrome.sidePanel.setOptions({
+  // IMPORTANT: sidePanel.open() must be invoked synchronously from the
+  // chrome.action.onClicked user gesture. Any await before open() makes Chrome
+  // reject the call with "may only be called in response to a user gesture".
+  //
+  // Queue the tab-specific options first, then open immediately in the same
+  // event-handler turn. Chrome processes these extension API calls in order.
+  const enablePromise = chrome.sidePanel.setOptions({
     tabId: tab.id,
     path: PANEL_PATH,
     enabled: true
   });
 
-  owners[windowKey] = tab.id;
-  await saveSidePanelOwners(owners);
+  const openPromise = chrome.sidePanel.open({
+    tabId: tab.id
+  });
 
-  await chrome.sidePanel.open({ tabId: tab.id });
+  // Ownership bookkeeping and disabling the previous tab can safely happen
+  // after open() has already been issued under the user gesture.
+  return Promise.all([enablePromise, openPromise]).then(async () => {
+    const owners = await getSidePanelOwners();
+    const windowKey = String(tab.windowId);
+    const previousTabId = Number(owners[windowKey] || 0);
+
+    owners[windowKey] = tab.id;
+    await saveSidePanelOwners(owners);
+
+    if (previousTabId && previousTabId !== tab.id) {
+      try {
+        await chrome.sidePanel.setOptions({
+          tabId: previousTabId,
+          enabled: false
+        });
+      } catch (_) {
+        // The previous tab may already be closed.
+      }
+    }
+  });
 }
 
 async function forgetSidePanelOwnerForTab(tabId) {

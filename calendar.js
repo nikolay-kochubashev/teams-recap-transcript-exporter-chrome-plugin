@@ -2,7 +2,7 @@
   if (window.__teamsTranscriptCalendarLoaded) return;
   window.__teamsTranscriptCalendarLoaded = true;
 
-  const VERSION = '2.0.18';
+  const VERSION = '2.0.19';
   let actionMap = new Map();
   let lastCalendarScanDebug = { rejected: [], candidates: [], acceptedCount: 0 };
 
@@ -652,7 +652,8 @@
       clientX: r.left + Math.max(1, r.width / 2),
       clientY: r.top + Math.max(1, r.height / 2),
       button: 0,
-      buttons: 1
+      buttons: 1,
+      detail: 1
     };
 
     try { el.dispatchEvent(new PointerEvent('pointerdown', { ...opts, pointerId: 1, pointerType: 'mouse', isPrimary: true })); } catch (_) {}
@@ -660,6 +661,106 @@
     try { el.dispatchEvent(new PointerEvent('pointerup', { ...opts, pointerId: 1, pointerType: 'mouse', isPrimary: true, buttons: 0 })); } catch (_) {}
     try { el.dispatchEvent(new MouseEvent('mouseup', { ...opts, buttons: 0 })); } catch (_) {}
     try { el.dispatchEvent(new MouseEvent('click', { ...opts, buttons: 0 })); } catch (_) {}
+  }
+
+  function describeActivationTarget(el, name) {
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return {
+      name,
+      tag: el.tagName || '',
+      role: el.getAttribute?.('role') || '',
+      className: typeof el.className === 'string' ? el.className.slice(0, 220) : '',
+      text: normalize(el.innerText || el.textContent || '').slice(0, 180),
+      rect: {
+        left: Math.round(r.left),
+        top: Math.round(r.top),
+        width: Math.round(r.width),
+        height: Math.round(r.height)
+      }
+    };
+  }
+
+  function calendarActivationTargets(card) {
+    const result = [];
+    const seen = new Set();
+
+    const add = (name, el) => {
+      if (!el || !(el instanceof Element) || seen.has(el) || !isRendered(el)) return;
+      seen.add(el);
+      result.push({ name, el });
+    };
+
+    add('card', card);
+
+    // Fluent UI event cards wrap the actual body in a stable ui-card__body
+    // element. Recurring meetings can react to the body while a synthetic
+    // click on the role=group wrapper itself is ignored.
+    add('card-body', card.querySelector('[class*="ui-card__body"]'));
+
+    const r = card.getBoundingClientRect();
+    if (r.width > 2 && r.height > 2) {
+      const points = [
+        ['center-hit', r.left + r.width / 2, r.top + r.height / 2],
+        ['title-hit', r.left + Math.min(40, r.width * 0.25), r.top + Math.min(24, r.height * 0.3)]
+      ];
+      for (const [name, x, y] of points) {
+        const hit = document.elementFromPoint(
+          Math.max(0, Math.min(innerWidth - 1, x)),
+          Math.max(0, Math.min(innerHeight - 1, y))
+        );
+        if (hit && (hit === card || card.contains(hit))) add(name, hit);
+      }
+    }
+
+    // In the captured Teams DOM the event card itself is inside
+    // <div class="fui-Primitive" draggable="true">.
+    const wrapper = card.parentElement;
+    if (wrapper?.getAttribute?.('draggable') === 'true') add('draggable-wrapper', wrapper);
+
+    return result;
+  }
+
+  function dispatchKeyboardActivation(el, key) {
+    const code = key === ' ' ? 'Space' : 'Enter';
+    const keyCode = key === ' ' ? 32 : 13;
+    try { el.focus({ preventScroll: true }); } catch (_) {}
+    try {
+      el.dispatchEvent(new KeyboardEvent('keydown', {
+        key,
+        code,
+        keyCode,
+        which: keyCode,
+        bubbles: true,
+        cancelable: true,
+        composed: true
+      }));
+      el.dispatchEvent(new KeyboardEvent('keyup', {
+        key,
+        code,
+        keyCode,
+        which: keyCode,
+        bubbles: true,
+        cancelable: true,
+        composed: true
+      }));
+    } catch (_) {}
+  }
+
+  function dispatchDoubleClick(el) {
+    const r = el.getBoundingClientRect();
+    const opts = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: window,
+      clientX: r.left + Math.max(1, r.width / 2),
+      clientY: r.top + Math.max(1, r.height / 2),
+      button: 0,
+      buttons: 0,
+      detail: 2
+    };
+    try { el.dispatchEvent(new MouseEvent('dblclick', opts)); } catch (_) {}
   }
 
   async function openCalendarMeeting(meeting) {
@@ -672,7 +773,7 @@
         const chatAction = findChatWithParticipants(meeting);
         if (chatAction) return { mode: 'popup', chatAction };
         if (meetingDetailsViewMatches(meeting)) return { mode: 'details', chatAction: null };
-        await sleep(140);
+        await sleep(120);
       }
       return null;
     }
@@ -688,15 +789,37 @@
         if (!ensured.ok) return null;
       }
 
-      await sleep(250);
-      return findMeetingElement(meeting);
+      await sleep(300);
+      const card = findMeetingElement(meeting);
+      if (!card) return null;
+
+      try { card.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (_) {}
+      await sleep(180);
+      return findMeetingElement(meeting) || card;
     }
 
-    const methods = ['click', 'pointer-sequence', 'keyboard-enter'];
+    async function restoreForNextAttempt() {
+      try {
+        if (!visibleCalendarRange()) await navigateToCalendar();
+        if (meeting?.dateStamp) await ensureCalendarDate(meeting.dateStamp);
+        await sleep(300);
+      } catch (_) {}
+    }
 
-    for (const method of methods) {
-      const el = await prepareFreshCard();
-      if (!el) {
+    // Try several DOM targets. The real Teams markup uses role=group inside a
+    // draggable Fluent wrapper, and recurring events do not always react to
+    // synthetic activation on the outer role=group element.
+    const strategies = [
+      { type: 'click' },
+      { type: 'pointer' },
+      { type: 'keyboard-enter', cardOnly: true },
+      { type: 'keyboard-space', cardOnly: true },
+      { type: 'double-click' }
+    ];
+
+    for (const strategy of strategies) {
+      const card = await prepareFreshCard();
+      if (!card) {
         return {
           ok: false,
           error: 'Meeting card not found in current Calendar view.',
@@ -705,53 +828,59 @@
         };
       }
 
-      lastTarget = el;
-      try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (_) {}
-      await sleep(150);
-      try { el.focus({ preventScroll: true }); } catch (_) {}
+      lastTarget = card;
+      const targets = strategy.cardOnly
+        ? [{ name: 'card', el: card }]
+        : calendarActivationTargets(card);
 
-      if (method === 'click') {
-        try { el.click(); } catch (_) { dispatchPointerSequence(el); }
-      } else if (method === 'pointer-sequence') {
-        dispatchPointerSequence(el);
-      } else {
-        try {
-          el.dispatchEvent(new KeyboardEvent('keydown', {
-            key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
-            bubbles: true, cancelable: true, composed: true
-          }));
-          el.dispatchEvent(new KeyboardEvent('keyup', {
-            key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
-            bubbles: true, cancelable: true, composed: true
-          }));
-        } catch (_) {}
+      for (const target of targets) {
+        try { target.el.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (_) {}
+        await sleep(80);
+
+        if (strategy.type === 'click') {
+          try { target.el.click(); } catch (_) { dispatchPointerSequence(target.el); }
+        } else if (strategy.type === 'pointer') {
+          dispatchPointerSequence(target.el);
+        } else if (strategy.type === 'keyboard-enter') {
+          dispatchKeyboardActivation(target.el, 'Enter');
+        } else if (strategy.type === 'keyboard-space') {
+          dispatchKeyboardActivation(target.el, ' ');
+        } else if (strategy.type === 'double-click') {
+          dispatchDoubleClick(target.el);
+        }
+
+        attempts.push({
+          strategy: strategy.type,
+          target: describeActivationTarget(target.el, target.name)
+        });
+
+        const openedState = await waitForOpenedState(1700);
+        if (openedState) {
+          return {
+            ok: true,
+            mode: openedState.mode,
+            url: location.href,
+            attempts,
+            activation: attempts[attempts.length - 1],
+            target: {
+              tag: card.tagName,
+              role: card.getAttribute('role') || '',
+              dataTestId: card.getAttribute('data-testid') || '',
+              elementId: card.id || '',
+              ariaLabel: card.getAttribute('aria-label') || ''
+            }
+          };
+        }
+
+        // If Teams navigated somewhere that is neither Calendar nor the
+        // requested meeting, restore Calendar before trying another target.
+        if (!visibleCalendarRange()) {
+          await restoreForNextAttempt();
+          break;
+        }
       }
 
-      attempts.push(method);
-      const openedState = await waitForOpenedState(3200);
-      if (openedState) {
-        return {
-          ok: true,
-          mode: openedState.mode,
-          url: location.href,
-          attempts,
-          target: {
-            tag: el.tagName,
-            role: el.getAttribute('role') || '',
-            dataTestId: el.getAttribute('data-testid') || '',
-            elementId: el.id || '',
-            ariaLabel: el.getAttribute('aria-label') || ''
-          }
-        };
-      }
-
-      // A failed activation can leave Teams on the previous meeting details page.
-      // Return to Calendar and reacquire a fresh DOM card before the next attempt.
-      try {
-        await navigateToCalendar();
-        if (meeting?.dateStamp) await ensureCalendarDate(meeting.dateStamp);
-        await sleep(300);
-      } catch (_) {}
+      await restoreForNextAttempt();
     }
 
     return {

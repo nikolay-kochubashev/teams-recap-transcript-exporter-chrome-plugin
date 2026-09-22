@@ -357,7 +357,7 @@ async function waitForRecapCards(tabId, dateStamp, timeoutMs = 12000) {
   return dateStamp ? last.filter(x => x.dateStamp === dateStamp) : last;
 }
 
-async function extractRecordingFromTab(tabId, meeting, recordingUrl, recordingIndex, preferredFrameId = null) {
+async function extractRecordingFromTab(tabId, meeting, recordingUrl, recordingIndex, preferredFrameId = null, fileMeta = null) {
   await patchBatch({
     message: `Собираю транскрипцию: ${meeting.title || meeting.label}`
   });
@@ -421,9 +421,20 @@ async function extractRecordingFromTab(tabId, meeting, recordingUrl, recordingIn
   }
 
   const stamp = dateStampFromUrl(recordingUrl) || meeting.dateStamp || todayStamp();
-  const suffix = recordingIndex > 0
-    ? `_${String(recordingIndex + 1).padStart(2, '0')}`
-    : '';
+  const sessionStart = String(fileMeta?.sessionStartTime || '').replace(':', '');
+  const sessionEnd = String(fileMeta?.sessionEndTime || '').replace(':', '');
+  const transcriptIndex = Number(fileMeta?.transcriptIndex || 0);
+
+  let suffix = '';
+  if (sessionStart) {
+    suffix = ` - ${sessionStart}${sessionEnd ? `-${sessionEnd}` : ''}`;
+    if (transcriptIndex > 0) {
+      suffix += `_${String(transcriptIndex + 1).padStart(2, '0')}`;
+    }
+  } else if (recordingIndex > 0) {
+    suffix = `_${String(recordingIndex + 1).padStart(2, '0')}`;
+  }
+
   const fileName = `${sanitizeFileName(meeting.title || meeting.label || state.title)} - ${stamp}${suffix}.txt`;
 
   const saved = await nativeMessage({
@@ -438,6 +449,7 @@ async function extractRecordingFromTab(tabId, meeting, recordingUrl, recordingIn
     recordingUrl,
     recordingIndex,
     frameId,
+    fileMeta: fileMeta || null,
     fileName,
     path: saved.path,
     chars: state.text.length,
@@ -614,7 +626,7 @@ async function ensureExactRecapCard(tabId, meeting, timeoutMs = 12000) {
   return recap;
 }
 
-async function extractTranscriptAfterAction(tabId, meeting, actionId, recordingIndex, sourcePrefix) {
+async function extractTranscriptAfterAction(tabId, meeting, actionId, recordingIndex, sourcePrefix, fileMeta = null) {
   let trigger = null;
   try {
     trigger = await sendTab(tabId, {
@@ -684,7 +696,8 @@ async function extractTranscriptAfterAction(tabId, meeting, actionId, recordingI
       meeting,
       tab.url || 'https://teams.microsoft.com/v2/',
       recordingIndex,
-      probe.selected.frameId
+      probe.selected.frameId,
+      fileMeta
     );
 
     await appendOperation(`${sourcePrefix}_TRANSCRIPT_EXTRACT_OK`, {
@@ -718,50 +731,88 @@ async function tryExtractTranscriptsFromExactRecap(tabId, meeting) {
   await appendOperation('EXACT_TRANSCRIPT_RECAP_LOOKUP', {
     meetingId: meeting.id,
     expectedDate: meeting.dateStamp || '',
+    expectedStartTime: meeting.startTime || '',
+    expectedEndTime: meeting.endTime || '',
     pageTitle: recap?.pageTitle || '',
     url: recap?.url || '',
     match: recap?.match || null,
-    matches: (recap?.matches || []).slice(0, 10)
+    matches: (recap?.matches || []).slice(0, 20)
   }, recap?.match ? 'INFO' : 'WARN');
 
-  if (!recap?.match) return [];
+  const initialMatches = (recap?.matches || []).filter(x => x?.hasTranscript);
+  if (!initialMatches.length) return [];
 
-  let actionIds = recap.match.actions?.transcriptActionIds ||
-    (recap.match.actions?.transcriptActionId ? [recap.match.actions.transcriptActionId] : []);
+  const targets = [];
+  for (const session of initialMatches) {
+    const actionIds = session.actions?.transcriptActionIds ||
+      (session.actions?.transcriptActionId ? [session.actions.transcriptActionId] : []);
 
-  if (!actionIds.length) return [];
+    actionIds.forEach((_, transcriptIndex) => {
+      targets.push({
+        sessionKey: session.sessionKey,
+        sessionStartTime: session.sessionStartTime || '',
+        sessionEndTime: session.sessionEndTime || '',
+        transcriptIndex
+      });
+    });
+  }
+
+  await appendOperation('EXACT_TRANSCRIPT_TARGETS', {
+    meetingId: meeting.id,
+    expectedDate: meeting.dateStamp || '',
+    expectedStartTime: meeting.startTime || '',
+    expectedEndTime: meeting.endTime || '',
+    count: targets.length,
+    targets
+  });
 
   const files = [];
-  const expectedCount = actionIds.length;
 
-  for (let index = 0; index < expectedCount; index++) {
+  for (let fileIndex = 0; fileIndex < targets.length; fileIndex++) {
     if (stopRequested) throw new Error('Остановлено пользователем.');
 
-    // Opening a transcript changes the SPA surface and invalidates DOM action
-    // references. Re-locate the exact dated recap card before every next file.
-    if (index > 0) {
-      recap = await ensureExactRecapCard(tabId, meeting, 12000);
-      actionIds = recap?.match?.actions?.transcriptActionIds ||
-        (recap?.match?.actions?.transcriptActionId ? [recap.match.actions.transcriptActionId] : []);
+    const target = targets[fileIndex];
 
-      if (!actionIds[index]) {
-        await appendOperation('EXACT_TRANSCRIPT_ACTION_MISSING', {
-          meetingId: meeting.id,
-          expectedDate: meeting.dateStamp || '',
-          index,
-          expectedCount,
-          availableCount: actionIds.length
-        }, 'WARN');
-        break;
-      }
+    // Opening a transcript changes the SPA surface and invalidates DOM action
+    // references. Re-locate the exact dated/time-bounded recap cards before
+    // every extraction, then select the same physical recap session again.
+    if (fileIndex > 0) {
+      recap = await ensureExactRecapCard(tabId, meeting, 12000);
+    }
+
+    const session = (recap?.matches || []).find(x => x.sessionKey === target.sessionKey);
+    const actionIds = session?.actions?.transcriptActionIds ||
+      (session?.actions?.transcriptActionId ? [session.actions.transcriptActionId] : []);
+    const actionId = actionIds[target.transcriptIndex];
+
+    if (!session || !actionId) {
+      await appendOperation('EXACT_TRANSCRIPT_ACTION_MISSING', {
+        meetingId: meeting.id,
+        sessionKey: target.sessionKey,
+        sessionStartTime: target.sessionStartTime,
+        sessionEndTime: target.sessionEndTime,
+        transcriptIndex: target.transcriptIndex,
+        availableSessions: (recap?.matches || []).map(x => ({
+          sessionKey: x.sessionKey,
+          sessionStartTime: x.sessionStartTime || '',
+          sessionEndTime: x.sessionEndTime || '',
+          transcriptCount: x.transcriptCount || 0
+        }))
+      }, 'WARN');
+      continue;
     }
 
     const file = await extractTranscriptAfterAction(
       tabId,
       meeting,
-      actionIds[index],
-      index,
-      'EXACT_RECAP'
+      actionId,
+      fileIndex,
+      'EXACT_RECAP',
+      {
+        sessionStartTime: target.sessionStartTime,
+        sessionEndTime: target.sessionEndTime,
+        transcriptIndex: target.transcriptIndex
+      }
     );
 
     if (file) files.push(file);

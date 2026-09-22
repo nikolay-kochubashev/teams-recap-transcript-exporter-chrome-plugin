@@ -2,7 +2,7 @@
   if (window.__teamsTranscriptCalendarLoaded) return;
   window.__teamsTranscriptCalendarLoaded = true;
 
-  const VERSION = '2.0.14';
+  const VERSION = '2.0.15';
   let actionMap = new Map();
   let lastCalendarScanDebug = { rejected: [], candidates: [], acceptedCount: 0 };
 
@@ -93,12 +93,13 @@
   }
 
   function parseDateStampParts(stamp) {
-    if (!/^\\d{8}$/.test(String(stamp || ''))) return null;
-    return {
-      year: Number(stamp.slice(0, 4)),
-      month: Number(stamp.slice(4, 6)),
-      day: Number(stamp.slice(6, 8))
-    };
+    const value = String(stamp ?? '').trim().replace(/[^0-9]/g, '');
+    if (!/^[0-9]{8}$/.test(value)) return null;
+    const year = Number(value.slice(0, 4));
+    const month = Number(value.slice(4, 6));
+    const day = Number(value.slice(6, 8));
+    if (year < 2000 || month < 1 || month > 12 || day < 1 || day > 31) return null;
+    return { year, month, day };
   }
 
   function datePartsToUtc(parts) {
@@ -436,6 +437,37 @@
     return null;
   }
 
+  function findClickableContainingText(pattern) {
+    const candidates = Array.from(document.querySelectorAll(
+      'button,a[href],[role="button"],[role="link"],[role="tab"],[tabindex]'
+    ))
+      .filter(isRendered)
+      .map(el => ({ el, text: interactiveText(el) }))
+      .filter(x => x.text && x.text.length <= 180 && pattern.test(x.text))
+      .sort((a, b) => {
+        const ar = a.el.getBoundingClientRect();
+        const br = b.el.getBoundingClientRect();
+        return (ar.width * ar.height) - (br.width * br.height);
+      });
+    if (candidates.length) return candidates[0].el;
+
+    const nodes = Array.from(document.querySelectorAll('body *'))
+      .filter(isRendered)
+      .map(el => ({ el, text: normalize(el.innerText || el.textContent || '') }))
+      .filter(x => x.text && x.text.length <= 180 && pattern.test(x.text))
+      .sort((a, b) => {
+        const ar = a.el.getBoundingClientRect();
+        const br = b.el.getBoundingClientRect();
+        return (ar.width * ar.height) - (br.width * br.height);
+      });
+
+    for (const x of nodes) {
+      const clickable = clickableAncestor(x.el, 8);
+      if (clickable) return clickable;
+    }
+    return null;
+  }
+
   function findMeetingDetailsAssets(meeting) {
     actionMap = new Map();
 
@@ -450,8 +482,12 @@
       };
     }
 
-    const recording = findClickableByExactText(/^(?:recording|запись)(?:\s|$)/i);
-    const transcript = findClickableByExactText(/^(?:transcript|транскрипт|расшифровка)(?:\s|$)/i);
+    const recording =
+      findClickableByExactText(/^(?:recording|запись)(?:\s|$)/i) ||
+      findClickableContainingText(/\b(?:recording|запись)\b/i);
+    const transcript =
+      findClickableByExactText(/^(?:transcript|транскрипт|расшифровка)(?:\s|$)/i) ||
+      findClickableContainingText(/\b(?:transcript|транскрипт|расшифровка)\b/i);
     const recapTab = findClickableByExactText(/^recap$/i);
     const chatTab = findClickableByExactText(/^chat$/i);
 
@@ -479,6 +515,14 @@
         transcript: !!transcript,
         recapTab: !!recapTab,
         chatTab: !!chatTab
+      },
+      meta: {
+        recordingText: recording ? interactiveText(recording) : '',
+        transcriptText: transcript ? interactiveText(transcript) : '',
+        recordingTag: recording?.tagName || '',
+        transcriptTag: transcript?.tagName || '',
+        recordingRole: recording?.getAttribute?.('role') || '',
+        transcriptRole: transcript?.getAttribute?.('role') || ''
       }
     };
   }
@@ -1094,10 +1138,39 @@
     if (!actionMap.has(id)) findActions();
     const target = actionMap.get(id);
     if (!target || !target.isConnected) return { ok: false, error: 'Action element not found.' };
+
+    const before = {
+      url: location.href,
+      title: document.title,
+      text: interactiveText(target),
+      tag: target.tagName,
+      role: target.getAttribute?.('role') || '',
+      href: target.href || target.closest?.('a[href]')?.href || ''
+    };
+
     try { target.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (_) {}
-    await sleep(80);
-    target.click();
-    return { ok: true, url: location.href };
+    await sleep(100);
+    try { target.focus({ preventScroll: true }); } catch (_) {}
+
+    let method = 'click';
+    try {
+      target.click();
+    } catch (_) {
+      method = 'pointer';
+      dispatchPointerSequence(target);
+    }
+
+    await sleep(450);
+
+    return {
+      ok: true,
+      method,
+      before,
+      after: {
+        url: location.href,
+        title: document.title
+      }
+    };
   }
 
   function findRecordingLinks() {

@@ -138,8 +138,18 @@ async function probeTranscriptFrames(tabId, timeoutMs = 9000) {
       return bs - as;
     });
 
+    // Do not accept the Teams page shell merely because it contains the
+    // word "Transcript". Right after opening Recap, the top frame exposes the
+    // Transcript tab before the lazy-loaded SharePoint transcript frame is ready.
+    // A real transcript scroller has semantic evidence such as transcript entry
+    // votes, timestamp rows or the Teams transcript warning/accessibility text.
     const selected = results.find(x =>
-      x.best && (x.best.strong || (x.best.score || 0) >= 45)
+      x.best && x.best.strong && (
+        (x.best.votes || 0) > 0 ||
+        (x.best.times || 0) > 0 ||
+        (x.best.reasons || []).includes('ai-warning') ||
+        (x.best.reasons || []).includes('transcript-a11y')
+      )
     ) || null;
 
     last = { selected, frames: results };
@@ -400,6 +410,14 @@ async function extractRecordingFromTab(tabId, meeting, recordingUrl, recordingIn
 
   if (!state || state.status !== 'done' || !state.text) {
     throw new Error('Тайм-аут ожидания транскрипции.');
+  }
+
+  // Guard against a false-positive extraction from the Teams Recap page shell.
+  // Real transcript output always contains at least one standalone timestamp;
+  // the shell snapshot contains only UI text such as Speakers/Shared files/Transcript.
+  const timestampLines = String(state.text || '').match(/^(?:\d{1,2}:)?\d{1,2}:\d{2}\s*$/gm) || [];
+  if (!timestampLines.length) {
+    throw new Error('Собран не текст транскрипции, а оболочка Recap. Ожидаю загрузку реальной области Transcript.');
   }
 
   const stamp = dateStampFromUrl(recordingUrl) || meeting.dateStamp || todayStamp();

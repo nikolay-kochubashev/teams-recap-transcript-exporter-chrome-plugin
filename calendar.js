@@ -2,7 +2,7 @@
   if (window.__teamsTranscriptCalendarLoaded) return;
   window.__teamsTranscriptCalendarLoaded = true;
 
-  const VERSION = '2.0.22';
+  const VERSION = '2.0.23';
   let actionMap = new Map();
   let lastCalendarScanDebug = { rejected: [], candidates: [], acceptedCount: 0 };
 
@@ -107,25 +107,79 @@
     return Date.UTC(parts.year, parts.month - 1, parts.day);
   }
 
+  function parseClockParts(hourText, minuteText, ampm) {
+    let hour = Number(hourText);
+    const minute = Number(minuteText);
+    if (ampm) {
+      const ap = String(ampm).toUpperCase();
+      if (ap === 'AM' && hour === 12) hour = 0;
+      if (ap === 'PM' && hour !== 12) hour += 12;
+    }
+    return { hour, minute };
+  }
+
   function parseStartTime(text) {
     const value = normalize(text);
 
     // Parse 12-hour clock first. Otherwise "3:00 PM" is prematurely
     // interpreted by the generic 24-hour regex as 03:00.
     let m = value.match(/\b(1[0-2]|0?[1-9]):([0-5]\d)\s*(AM|PM)\b/i);
-    if (m) {
-      let hour = Number(m[1]);
-      const minute = Number(m[2]);
-      const ap = m[3].toUpperCase();
-      if (ap === 'AM' && hour === 12) hour = 0;
-      if (ap === 'PM' && hour !== 12) hour += 12;
-      return { hour, minute };
-    }
+    if (m) return parseClockParts(m[1], m[2], m[3]);
 
     m = value.match(/\b([01]?\d|2[0-3]):([0-5]\d)\b/);
-    if (m) return { hour: Number(m[1]), minute: Number(m[2]) };
+    if (m) return parseClockParts(m[1], m[2], '');
 
     return null;
+  }
+
+  function parseExplicitTimeRange(text) {
+    const value = normalize(text);
+
+    let m = value.match(
+      /\b(1[0-2]|0?[1-9]):([0-5]\d)\s*(AM|PM)\s*(?:-|–|—|to)\s*(1[0-2]|0?[1-9]):([0-5]\d)\s*(AM|PM)\b/i
+    );
+    if (m) {
+      return {
+        start: parseClockParts(m[1], m[2], m[3]),
+        end: parseClockParts(m[4], m[5], m[6])
+      };
+    }
+
+    m = value.match(
+      /\b([01]?\d|2[0-3]):([0-5]\d)\s*(?:-|–|—|to)\s*([01]?\d|2[0-3]):([0-5]\d)\b/i
+    );
+    if (m) {
+      return {
+        start: parseClockParts(m[1], m[2], ''),
+        end: parseClockParts(m[3], m[4], '')
+      };
+    }
+
+    return null;
+  }
+
+  function timePartsText(parts) {
+    return parts
+      ? `${String(parts.hour).padStart(2, '0')}:${String(parts.minute).padStart(2, '0')}`
+      : '';
+  }
+
+  function timeTextMinutes(value) {
+    const m = String(value || '').match(/^(\d{2}):(\d{2})$/);
+    return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+  }
+
+  function timeRangesOverlap(startA, endA, startB, endB) {
+    let a1 = timeTextMinutes(startA);
+    let a2 = timeTextMinutes(endA);
+    let b1 = timeTextMinutes(startB);
+    let b2 = timeTextMinutes(endB);
+    if ([a1, a2, b1, b2].some(v => v === null)) return true;
+
+    if (a2 <= a1) a2 += 24 * 60;
+    if (b2 <= b1) b2 += 24 * 60;
+
+    return a1 < b2 && a2 > b1;
   }
 
   function toDateStamp(parts) {
@@ -253,11 +307,12 @@
       if (!label) continue;
 
       const date = parseFlexibleDate(label, calendarContext?.year);
-      const startTime = parseStartTime(label);
+      const timeRange = parseExplicitTimeRange(label);
+      const startTime = timeRange?.start || parseStartTime(label);
+      const endTime = timeRange?.end || null;
       const dateStamp = toDateStamp(date);
-      const startTimeText = startTime
-        ? `${String(startTime.hour).padStart(2, '0')}:${String(startTime.minute).padStart(2, '0')}`
-        : '';
+      const startTimeText = timePartsText(startTime);
+      const endTimeText = timePartsText(endTime);
       const title = cleanMeetingTitle(label);
       const r = el.getBoundingClientRect();
       const elementId = el.id || '';
@@ -269,6 +324,7 @@
         title,
         dateStamp,
         startTime: startTimeText,
+        endTime: endTimeText,
         sortKey: toSortKey(date, startTime, meetings.length),
         href: '',
         score: 1000,
@@ -293,6 +349,7 @@
           title,
           dateStamp,
           startTime: startTimeText,
+          endTime: endTimeText,
           elementId,
           ariaLabel: label
         });
@@ -1153,6 +1210,8 @@
 
     const expectedTitle = normalizedComparable(meeting?.title || '');
     const expectedDate = meeting?.dateStamp || '';
+    const expectedStart = meeting?.startTime || '';
+    const expectedEnd = meeting?.endTime || '';
     const matches = [];
 
     for (const card of cards) {
@@ -1162,6 +1221,9 @@
       const dateStamp = toDateStamp(
         parseFlexibleDate(fullContext, currentCalendarMonthYear()?.year)
       );
+      const sessionRange = parseExplicitTimeRange(fullContext);
+      const sessionStartTime = timePartsText(sessionRange?.start);
+      const sessionEndTime = timePartsText(sessionRange?.end);
 
       const titleNode = card.querySelector('[data-tid="meeting-title"]');
       const cardTitle = normalize(
@@ -1182,8 +1244,11 @@
           comparablePage.includes(expectedTitle)
         );
       const dateMatches = !!expectedDate && dateStamp === expectedDate;
+      const timeMatches = !expectedStart || !expectedEnd ||
+        !sessionStartTime || !sessionEndTime ||
+        timeRangesOverlap(sessionStartTime, sessionEndTime, expectedStart, expectedEnd);
 
-      if (!titleMatches || !dateMatches) continue;
+      if (!titleMatches || !dateMatches || !timeMatches) continue;
 
       const recordingButton = card.querySelector(
         '[data-testid="meeting-recap-chiclet-recording-image"]'
@@ -1197,16 +1262,18 @@
         '[data-testid="view-meeting-recap-button"], [data-testid="meeting-recap-chiclet-view-recap-button"]'
       );
 
+      const sessionKey = `${dateStamp}|${sessionStartTime}|${sessionEndTime}|${hash(headingText)}`;
       const actions = {};
+
       if (recordingButton) {
-        const actionId = `exact-recording-${hash(`${meeting.id}|recording|${headingText}`)}`;
+        const actionId = `exact-recording-${hash(`${meeting.id}|recording|${sessionKey}`)}`;
         actionMap.set(actionId, recordingButton);
         actions.recordingActionId = actionId;
       }
 
       const transcriptActionIds = [];
       transcriptButtons.forEach((el, index) => {
-        const actionId = `exact-transcript-${hash(`${meeting.id}|transcript|${headingText}|${index}|${interactiveText(el)}`)}`;
+        const actionId = `exact-transcript-${hash(`${meeting.id}|transcript|${sessionKey}|${index}|${interactiveText(el)}`)}`;
         actionMap.set(actionId, el);
         transcriptActionIds.push(actionId);
       });
@@ -1216,7 +1283,7 @@
       }
 
       if (viewRecapButton) {
-        const actionId = `exact-recap-${hash(`${meeting.id}|recap|${headingText}`)}`;
+        const actionId = `exact-recap-${hash(`${meeting.id}|recap|${sessionKey}`)}`;
         actionMap.set(actionId, viewRecapButton);
         actions.recapActionId = actionId;
       }
@@ -1224,6 +1291,9 @@
       matches.push({
         kind: card.getAttribute('data-testid') || '',
         dateStamp,
+        sessionKey,
+        sessionStartTime,
+        sessionEndTime,
         headingText: headingText.slice(0, 1200),
         cardTitle: cleanMeetingTitle(headingText),
         actions,
@@ -1234,10 +1304,22 @@
       });
     }
 
+    matches.sort((a, b) => {
+      const am = timeTextMinutes(a.sessionStartTime);
+      const bm = timeTextMinutes(b.sessionStartTime);
+      if (am !== null && bm !== null && am !== bm) return am - bm;
+      return a.headingText.localeCompare(b.headingText, 'ru');
+    });
+
     return {
       ok: true,
       match: matches[0] || null,
       matches,
+      expectedWindow: {
+        dateStamp: expectedDate,
+        startTime: expectedStart,
+        endTime: expectedEnd
+      },
       pageTitle: document.title,
       url: location.href
     };

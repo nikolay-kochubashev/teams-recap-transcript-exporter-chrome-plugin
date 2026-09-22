@@ -428,15 +428,117 @@ async function waitForExactMeetingRecap(tabId, meeting, timeoutMs = 20000) {
   return last || { ok: true, match: null, matches: [] };
 }
 
+async function waitForMeetingDetailsAssets(tabId, meeting, timeoutMs = 7000) {
+  const started = Date.now();
+  let last = null;
+
+  while (Date.now() - started < timeoutMs) {
+    try {
+      last = await sendTab(tabId, {
+        type: 'PAGE_FIND_MEETING_DETAILS_ASSETS',
+        meeting
+      }, 4000);
+
+      if (last?.match && (last?.found?.transcript || last?.found?.recording)) {
+        if (last?.found?.transcript) return last;
+      }
+    } catch (_) {}
+
+    await delay(350);
+  }
+
+  return last;
+}
+
+async function tryExtractTranscriptFromMeetingDetails(tabId, meeting) {
+  const details = await waitForMeetingDetailsAssets(tabId, meeting, 8000);
+
+  await appendOperation('DETAILS_TRANSCRIPT_LOOKUP', {
+    meetingId: meeting.id,
+    match: !!details?.match,
+    found: details?.found || null,
+    meta: details?.meta || null,
+    actions: details?.actions || {},
+    pageTitle: details?.pageTitle || '',
+    url: details?.url || ''
+  }, details?.found?.transcript ? 'INFO' : 'WARN');
+
+  const actionId = details?.actions?.transcriptActionId;
+  if (!actionId) return null;
+
+  let trigger = null;
+  try {
+    trigger = await sendTab(tabId, {
+      type: 'PAGE_TRIGGER_ACTION',
+      id: actionId
+    }, 5000);
+  } catch (e) {
+    await appendOperation('DETAILS_TRANSCRIPT_TRIGGER_ERROR', {
+      meetingId: meeting.id,
+      error: e?.message || String(e)
+    }, 'WARN');
+    return null;
+  }
+
+  await appendOperation('DETAILS_TRANSCRIPT_TRIGGER', {
+    meetingId: meeting.id,
+    actionId,
+    trigger
+  }, trigger?.ok ? 'INFO' : 'WARN');
+
+  if (!trigger?.ok) return null;
+
+  await delay(1400);
+
+  try {
+    // Reset the generic transcript collector because the same Teams tab may
+    // have stale state from a previous attempt.
+    try {
+      await sendTab(tabId, { type: 'CLEAR_RESULT' }, 3000);
+    } catch (_) {}
+
+    const tab = await chrome.tabs.get(tabId);
+    const file = await extractRecordingFromTab(
+      tabId,
+      meeting,
+      tab.url || 'https://teams.microsoft.com/v2/',
+      0
+    );
+
+    await appendOperation('DETAILS_TRANSCRIPT_EXTRACT_OK', {
+      meetingId: meeting.id,
+      fileName: file?.fileName || '',
+      path: file?.path || '',
+      chars: file?.chars || 0,
+      items: file?.items || 0
+    });
+
+    return file;
+  } catch (e) {
+    await appendOperation('DETAILS_TRANSCRIPT_EXTRACT_FAILED', {
+      meetingId: meeting.id,
+      error: e?.message || String(e)
+    }, 'WARN');
+    return null;
+  }
+}
+
 async function triggerExactActionAndFindRecording(tabId, actionId, meeting) {
   const source = await chrome.tabs.get(tabId);
   const before = await chrome.tabs.query({ windowId: source.windowId });
   const beforeIds = new Set(before.map(t => t.id));
 
-  await sendTab(tabId, { type: 'PAGE_TRIGGER_ACTION', id: actionId }, 5000);
+  const trigger = await sendTab(tabId, { type: 'PAGE_TRIGGER_ACTION', id: actionId }, 5000);
+
+  await appendOperation('EXACT_RECORDING_ACTION_TRIGGER', {
+    meetingId: meeting.id,
+    actionId,
+    trigger
+  }, trigger?.ok ? 'INFO' : 'WARN');
 
   const started = Date.now();
   let lastTabs = [];
+  let lastPage = null;
 
   while (Date.now() - started < 12000) {
     const tabs = await chrome.tabs.query({ windowId: source.windowId });
@@ -453,12 +555,27 @@ async function triggerExactActionAndFindRecording(tabId, actionId, meeting) {
       }
     }
 
+    // Some Teams builds keep the recording inside the same SPA page instead
+    // of navigating the browser tab. Inspect links/actions that appeared
+    // after the click as well.
+    try {
+      lastPage = await sendTab(tabId, { type: 'PAGE_FIND_RECORDINGS' }, 3500);
+      const urls = (lastPage?.recordingLinks || []).map(x => x.href).filter(Boolean);
+      if (urls.length) return [...new Set(urls)];
+    } catch (_) {}
+
     await delay(400);
   }
 
   await appendOperation('EXACT_RECORDING_ACTION_NO_URL', {
     meetingId: meeting.id,
     actionId,
+    page: lastPage ? {
+      pageKind: lastPage.pageKind || '',
+      url: lastPage.url || '',
+      actions: (lastPage.actions || []).slice(0, 20),
+      recordingLinks: (lastPage.recordingLinks || []).slice(0, 20)
+    } : null,
     tabs: lastTabs.slice(0, 20).map(t => ({
       id: t.id,
       url: t.url || '',
@@ -794,38 +911,49 @@ async function processMeeting(meeting, index) {
       details: opened.details || null
     });
 
-    await delay(1600);
-
-    const urls = await discoverRecordingUrls(calendarTabId, meeting);
-
-    await appendOperation('RECORDING_URLS_RESULT', {
-      meetingId: meeting.id,
-      calendarTabId,
-      count: urls.length,
-      urls
-    });
-
-    if (!urls.length) {
-      await appendOperation('MEETING_SKIP', {
-        meetingId: meeting.id,
-        reason: 'Не удалось найти recap-карточку или открыть запись выбранной встречи.'
-      }, 'WARN');
-
-      await logMeeting(meeting.id, {
-        status: 'skip',
-        message: 'Не удалось найти recap-карточку или открыть запись выбранной встречи.',
-        files: []
-      });
-      return;
-    }
+    await delay(1200);
 
     const files = [];
 
-    for (let i = 0; i < urls.length; i++) {
-      if (stopRequested) throw new Error('Остановлено пользователем.');
+    // Preferred path for the current Teams UI:
+    // Meeting Details -> Transcript -> extract directly from the Teams page.
+    const directFile = await tryExtractTranscriptFromMeetingDetails(
+      calendarTabId,
+      meeting
+    );
 
-      const file = await processRecordingUrl(urls[i], meeting, i, null);
-      files.push(file);
+    if (directFile) {
+      files.push(directFile);
+    } else {
+      const urls = await discoverRecordingUrls(calendarTabId, meeting);
+
+      await appendOperation('RECORDING_URLS_RESULT', {
+        meetingId: meeting.id,
+        calendarTabId,
+        count: urls.length,
+        urls
+      });
+
+      if (!urls.length) {
+        await appendOperation('MEETING_SKIP', {
+          meetingId: meeting.id,
+          reason: 'Не удалось открыть Transcript или найти запись выбранной встречи.'
+        }, 'WARN');
+
+        await logMeeting(meeting.id, {
+          status: 'skip',
+          message: 'Не удалось открыть Transcript или найти запись выбранной встречи.',
+          files: []
+        });
+        return;
+      }
+
+      for (let i = 0; i < urls.length; i++) {
+        if (stopRequested) throw new Error('Остановлено пользователем.');
+
+        const file = await processRecordingUrl(urls[i], meeting, i, null);
+        files.push(file);
+      }
     }
 
     await appendOperation('MEETING_DONE', {

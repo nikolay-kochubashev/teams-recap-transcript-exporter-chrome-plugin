@@ -2,7 +2,7 @@
   if (window.__teamsTranscriptCalendarLoaded) return;
   window.__teamsTranscriptCalendarLoaded = true;
 
-  const VERSION = '2.0.21';
+  const VERSION = '2.0.22';
   let actionMap = new Map();
   let lastCalendarScanDebug = { rejected: [], candidates: [], acceptedCount: 0 };
 
@@ -1188,23 +1188,37 @@
       const recordingButton = card.querySelector(
         '[data-testid="meeting-recap-chiclet-recording-image"]'
       );
-      const transcriptButton = Array.from(card.querySelectorAll('button')).find(btn =>
-        normalize(btn.getAttribute('aria-label') || btn.innerText || '') === 'Transcript'
+      const transcriptButtons = Array.from(card.querySelectorAll(
+        'button,[role="button"],a[href]'
+      )).filter(el =>
+        /^(?:transcript|транскрипт|расшифровка)(?:\s|$)/i.test(interactiveText(el))
       );
       const viewRecapButton = card.querySelector(
         '[data-testid="view-meeting-recap-button"], [data-testid="meeting-recap-chiclet-view-recap-button"]'
       );
 
       const actions = {};
-      for (const [kind, el] of [
-        ['recording', recordingButton],
-        ['transcript', transcriptButton],
-        ['recap', viewRecapButton]
-      ]) {
-        if (!el) continue;
-        const actionId = `exact-${kind}-${hash(`${meeting.id}|${kind}|${headingText}`)}`;
+      if (recordingButton) {
+        const actionId = `exact-recording-${hash(`${meeting.id}|recording|${headingText}`)}`;
+        actionMap.set(actionId, recordingButton);
+        actions.recordingActionId = actionId;
+      }
+
+      const transcriptActionIds = [];
+      transcriptButtons.forEach((el, index) => {
+        const actionId = `exact-transcript-${hash(`${meeting.id}|transcript|${headingText}|${index}|${interactiveText(el)}`)}`;
         actionMap.set(actionId, el);
-        actions[`${kind}ActionId`] = actionId;
+        transcriptActionIds.push(actionId);
+      });
+      if (transcriptActionIds.length) {
+        actions.transcriptActionId = transcriptActionIds[0];
+        actions.transcriptActionIds = transcriptActionIds;
+      }
+
+      if (viewRecapButton) {
+        const actionId = `exact-recap-${hash(`${meeting.id}|recap|${headingText}`)}`;
+        actionMap.set(actionId, viewRecapButton);
+        actions.recapActionId = actionId;
       }
 
       matches.push({
@@ -1214,7 +1228,8 @@
         cardTitle: cleanMeetingTitle(headingText),
         actions,
         hasRecording: !!recordingButton,
-        hasTranscript: !!transcriptButton,
+        hasTranscript: transcriptButtons.length > 0,
+        transcriptCount: transcriptButtons.length,
         hasViewRecap: !!viewRecapButton
       });
     }

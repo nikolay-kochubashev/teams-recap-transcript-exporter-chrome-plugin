@@ -772,12 +772,12 @@ async function processMeeting(meeting, index) {
     if (!urls.length) {
       await appendOperation('MEETING_SKIP', {
         meetingId: meeting.id,
-        reason: 'Recap/Transcript для выбранной даты не найден.'
+        reason: 'Не удалось автоматически найти Recap/Transcript для выбранной встречи.'
       }, 'WARN');
 
       await logMeeting(meeting.id, {
         status: 'skip',
-        message: 'Recap/Transcript для выбранной даты не найден.',
+        message: 'Не удалось автоматически найти Recap/Transcript для выбранной встречи.',
         files: []
       });
       return;

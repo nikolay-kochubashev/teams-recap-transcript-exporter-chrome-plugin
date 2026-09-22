@@ -2,7 +2,7 @@
   if (window.__teamsTranscriptCalendarLoaded) return;
   window.__teamsTranscriptCalendarLoaded = true;
 
-  const VERSION = '2.0.12';
+  const VERSION = '2.0.13';
   let actionMap = new Map();
   let lastCalendarScanDebug = { rejected: [], candidates: [], acceptedCount: 0 };
 
@@ -342,6 +342,95 @@
     }) || null;
   }
 
+  function interactiveText(el) {
+    return normalize(
+      el?.getAttribute?.('aria-label') ||
+      el?.getAttribute?.('title') ||
+      el?.innerText ||
+      el?.textContent ||
+      ''
+    );
+  }
+
+  function findChatWithParticipants(meeting) {
+    const pattern = /^(?:chat with participants|чат с участниками)$/i;
+    const expectedTitle = normalizedComparable(meeting?.title || '');
+
+    const candidates = Array.from(document.querySelectorAll(
+      'a[href],button,[role="button"],[role="link"],[tabindex]'
+    ))
+      .filter(isRendered)
+      .filter(el => pattern.test(interactiveText(el)));
+
+    if (!candidates.length) return null;
+    if (candidates.length === 1) return candidates[0];
+
+    const scoped = candidates.find(el => {
+      let node = el;
+      for (let i = 0; i < 8 && node; i++, node = node.parentElement) {
+        const text = normalizedComparable(node.innerText || node.textContent || '');
+        if (expectedTitle && text.includes(expectedTitle)) return true;
+      }
+      return false;
+    });
+
+    return scoped || candidates[0];
+  }
+
+  function popupDiagnostic(meeting) {
+    const chatCandidates = Array.from(document.querySelectorAll(
+      'a[href],button,[role="button"],[role="link"],[tabindex]'
+    ))
+      .filter(isRendered)
+      .map(el => interactiveText(el))
+      .filter(Boolean)
+      .filter(text => /chat|participants|join|edit/i.test(text))
+      .slice(0, 30);
+
+    const peeks = Array.from(document.querySelectorAll('[data-tid="peek-body-container"]'))
+      .filter(isRendered)
+      .map(el => normalize(el.innerText || el.textContent || '').slice(0, 1200));
+
+    return {
+      expectedTitle: meeting?.title || '',
+      documentTitle: document.title,
+      url: location.href,
+      peekCount: peeks.length,
+      peeks,
+      chatCandidates
+    };
+  }
+
+  async function waitForChatAction(meeting, timeoutMs = 1800) {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      const action = findChatWithParticipants(meeting);
+      if (action) return action;
+      await sleep(120);
+    }
+    return null;
+  }
+
+  function dispatchPointerSequence(el) {
+    const r = el.getBoundingClientRect();
+    const opts = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: window,
+      clientX: r.left + Math.max(1, r.width / 2),
+      clientY: r.top + Math.max(1, r.height / 2),
+      button: 0,
+      buttons: 1
+    };
+
+    try { el.dispatchEvent(new PointerEvent('pointerdown', { ...opts, pointerId: 1, pointerType: 'mouse', isPrimary: true })); } catch (_) {}
+    try { el.dispatchEvent(new MouseEvent('mousedown', opts)); } catch (_) {}
+    try { el.dispatchEvent(new PointerEvent('pointerup', { ...opts, pointerId: 1, pointerType: 'mouse', isPrimary: true, buttons: 0 })); } catch (_) {}
+    try { el.dispatchEvent(new MouseEvent('mouseup', { ...opts, buttons: 0 })); } catch (_) {}
+    try { el.dispatchEvent(new MouseEvent('click', { ...opts, buttons: 0 })); } catch (_) {}
+  }
+
   async function openCalendarMeeting(meeting) {
     const el = findMeetingElement(meeting);
     if (!el) {
@@ -349,16 +438,66 @@
     }
 
     try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (_) {}
-    await sleep(100);
+    await sleep(120);
     try { el.focus({ preventScroll: true }); } catch (_) {}
-    el.click();
-    await sleep(350);
+
+    const attempts = [];
+
+    // Fluent UI calendar cards are role=group rather than native buttons.
+    // Try the lightweight DOM click first.
+    try {
+      el.click();
+      attempts.push('click');
+    } catch (_) {}
+    let chatAction = await waitForChatAction(meeting, 1200);
+
+    // Some Teams builds bind the card to pointer events.
+    if (!chatAction) {
+      dispatchPointerSequence(el);
+      attempts.push('pointer-sequence');
+      chatAction = await waitForChatAction(meeting, 1400);
+    }
+
+    // Keyboard activation is the accessibility path for role=group/tabindex=0.
+    if (!chatAction) {
+      try {
+        el.focus({ preventScroll: true });
+        el.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
+          bubbles: true, cancelable: true, composed: true
+        }));
+        el.dispatchEvent(new KeyboardEvent('keyup', {
+          key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
+          bubbles: true, cancelable: true, composed: true
+        }));
+        attempts.push('keyboard-enter');
+      } catch (_) {}
+      chatAction = await waitForChatAction(meeting, 1600);
+    }
+
+    if (!chatAction) {
+      return {
+        ok: false,
+        error: 'Meeting details opened action not found after activating Calendar card.',
+        attempts,
+        diagnostic: popupDiagnostic(meeting),
+        target: {
+          tag: el.tagName,
+          role: el.getAttribute('role') || '',
+          dataTestId: el.getAttribute('data-testid') || '',
+          elementId: el.id || '',
+          ariaLabel: el.getAttribute('aria-label') || ''
+        }
+      };
+    }
 
     return {
       ok: true,
       url: location.href,
+      attempts,
       target: {
         tag: el.tagName,
+        role: el.getAttribute('role') || '',
         dataTestId: el.getAttribute('data-testid') || '',
         elementId: el.id || '',
         ariaLabel: el.getAttribute('aria-label') || ''
@@ -370,45 +509,43 @@
     const opened = await openCalendarMeeting(meeting);
     if (!opened.ok) return opened;
 
-    const expectedTitle = normalizedComparable(meeting.title);
-
-    for (let attempt = 0; attempt < 40; attempt++) {
-      const dialogs = Array.from(document.querySelectorAll('[role="dialog"]')).filter(isRendered);
-
-      for (const dialog of dialogs) {
-        const dialogText = normalize(dialog.innerText || dialog.textContent || '');
-        if (expectedTitle && !normalizedComparable(dialogText).includes(expectedTitle)) continue;
-
-        const body = dialog.querySelector('[data-tid="peek-body-container"]') || dialog;
-        const buttons = Array.from(body.querySelectorAll('button')).filter(isRendered);
-        const chatButton = buttons.find(btn =>
-          normalize(btn.innerText || btn.textContent || '') === 'Chat with participants'
-        );
-
-        if (!chatButton) continue;
-
-        const popup = {
-          title: meeting.title,
-          text: dialogText.slice(0, 1200),
-          hasPeekBody: !!dialog.querySelector('[data-tid="peek-body-container"]')
-        };
-
-        chatButton.click();
-        await sleep(700);
-
-        return {
-          ok: true,
-          url: location.href,
-          popup
-        };
-      }
-
-      await sleep(150);
+    const chatButton = findChatWithParticipants(meeting);
+    if (!chatButton) {
+      return {
+        ok: false,
+        error: '"Chat with participants" action disappeared after meeting details opened.',
+        attempts: opened.attempts || [],
+        diagnostic: popupDiagnostic(meeting)
+      };
     }
 
+    const popupText = (() => {
+      let node = chatButton;
+      for (let i = 0; i < 8 && node; i++, node = node.parentElement) {
+        if (node.matches?.('[data-tid="peek-body-container"],[role="dialog"]')) {
+          return normalize(node.innerText || node.textContent || '').slice(0, 1200);
+        }
+      }
+      return '';
+    })();
+
+    try { chatButton.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (_) {}
+    try { chatButton.focus({ preventScroll: true }); } catch (_) {}
+    try { chatButton.click(); } catch (_) { dispatchPointerSequence(chatButton); }
+
+    await sleep(900);
+
     return {
-      ok: false,
-      error: 'Meeting details popup or "Chat with participants" button not found.'
+      ok: true,
+      url: location.href,
+      attempts: opened.attempts || [],
+      popup: {
+        text: popupText,
+        actionTag: chatButton.tagName,
+        actionRole: chatButton.getAttribute('role') || '',
+        actionAriaLabel: chatButton.getAttribute('aria-label') || '',
+        actionText: interactiveText(chatButton)
+      }
     };
   }
 
@@ -527,8 +664,10 @@
 
     for (const card of cards) {
       const { headingText } = recapCardContext(card);
+      const cardText = normalize(card.innerText || card.textContent || '');
+      const fullContext = normalize(`${headingText} ${cardText}`);
       const dateStamp = toDateStamp(
-        parseFlexibleDate(headingText, currentCalendarMonthYear()?.year)
+        parseFlexibleDate(fullContext, currentCalendarMonthYear()?.year)
       );
 
       const titleNode = card.querySelector('[data-tid="meeting-title"]');
@@ -536,15 +675,19 @@
         titleNode?.innerText ||
         titleNode?.textContent ||
         card.querySelector('[data-testid="meeting-recap-chiclet-top-container"]')?.innerText ||
-        card.innerText ||
-        ''
+        cardText
       );
       const comparableCard = normalizedComparable(cardTitle);
       const comparableHeading = normalizedComparable(headingText);
+      const comparablePage = normalizedComparable(document.title);
 
       const titleMatches =
         !!expectedTitle &&
-        (comparableCard.includes(expectedTitle) || comparableHeading.includes(expectedTitle));
+        (
+          comparableCard.includes(expectedTitle) ||
+          comparableHeading.includes(expectedTitle) ||
+          comparablePage.includes(expectedTitle)
+        );
       const dateMatches = !!expectedDate && dateStamp === expectedDate;
 
       if (!titleMatches || !dateMatches) continue;

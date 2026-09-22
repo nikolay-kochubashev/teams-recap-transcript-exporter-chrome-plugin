@@ -2,7 +2,7 @@
   if (window.__teamsTranscriptCalendarLoaded) return;
   window.__teamsTranscriptCalendarLoaded = true;
 
-  const VERSION = '2.0.8';
+  const VERSION = '2.0.9';
   let actionMap = new Map();
   let lastCalendarScanDebug = { rejected: [], candidates: [], acceptedCount: 0 };
 
@@ -532,6 +532,124 @@
     return '';
   }
 
+  function normalizedComparable(value) {
+    return normalize(value)
+      .toLowerCase()
+      .replace(/[“”"'.,;:()[\]{}]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function elementBelongsToMeeting(el, meeting) {
+    if (!el || !meeting?.title) return false;
+    const expected = normalizedComparable(meeting.title);
+    if (!expected) return false;
+
+    let node = el;
+    for (let depth = 0; node && depth < 8; depth++, node = node.parentElement) {
+      if (!(node instanceof Element)) break;
+      const text = normalize(node.innerText || node.textContent || '');
+      if (!text || text.length > 6500) continue;
+      const comparable = normalizedComparable(text);
+
+      if (comparable.includes(expected)) {
+        return true;
+      }
+
+      // Do not walk all the way into the global Teams shell. Otherwise a
+      // left-navigation "Chat" button eventually inherits the whole page text
+      // and incorrectly looks related to the meeting.
+      if (
+        node.matches('body,main,[role="main"],nav,[role="navigation"]') ||
+        text.length > 4500
+      ) {
+        break;
+      }
+    }
+    return false;
+  }
+
+  function classifyMeetingScopedAction(label, href) {
+    const value = normalize(label);
+    const lower = \`\${value} \${href || ''}\`.toLowerCase();
+
+    if (/view\s+recap|open\s+recap|meeting\s+recap/i.test(value)) return 'recap';
+    if (/watch\s+recording|open\s+recording|meeting\s+recording|recorded/i.test(value) || /stream\.aspx|\.mp4(?:\?|$)/i.test(href || '')) return 'recording';
+    if (/^(?:chat|meeting chat|open chat|chat with participants)$/i.test(value)) return 'chat';
+    if (/^transcript$/i.test(value)) return 'transcript';
+
+    // A direct SharePoint/Stream link inside the meeting details is also safe.
+    if (/sharepoint\.com|stream\.aspx/i.test(lower)) return 'recording';
+    return '';
+  }
+
+  function findMeetingScopedActions(meeting) {
+    actionMap = new Map();
+    const result = [];
+    let seq = 0;
+    const els = Array.from(document.querySelectorAll(
+      'a[href],button,[role="button"],[role="link"],[tabindex]'
+    ));
+
+    for (const el of els) {
+      if (!isRendered(el)) continue;
+      if (!elementBelongsToMeeting(el, meeting)) continue;
+
+      const label = accessibleText(el);
+      const href = el.href || el.closest('a[href]')?.href || '';
+      const kind = classifyMeetingScopedAction(label, href);
+      if (!kind) continue;
+
+      const id = \`meeting-\${++seq}-\${hash(\`\${kind}|\${label}|\${href}\`)}\`;
+      actionMap.set(id, el);
+      result.push({
+        id,
+        kind,
+        label,
+        href,
+        contextTitle: meeting.title
+      });
+    }
+
+    return result.slice(0, 40);
+  }
+
+  function getCurrentConversationTitle() {
+    const candidates = Array.from(document.querySelectorAll(
+      'h1,h2,h3,[role="heading"]'
+    ))
+      .filter(isRendered)
+      .map(el => {
+        const r = el.getBoundingClientRect();
+        return {
+          text: normalize(el.innerText || el.textContent || ''),
+          top: r.top,
+          left: r.left,
+          width: r.width
+        };
+      })
+      .filter(x =>
+        x.text &&
+        x.text.length >= 3 &&
+        x.text.length <= 220 &&
+        x.top >= 80 &&
+        x.top <= 320 &&
+        !/^(?:chat|recap|attendance|shared|calendar)$/i.test(x.text)
+      )
+      .sort((a, b) => a.top - b.top || a.left - b.left);
+
+    return candidates[0]?.text || '';
+  }
+
+  function getPageContext() {
+    return {
+      url: location.href,
+      pageKind: pageKind(),
+      conversationTitle: getCurrentConversationTitle(),
+      documentTitle: document.title
+    };
+  }
+
   function findActions() {
     actionMap = new Map();
     const result = [];
@@ -642,6 +760,18 @@
     }
     if (type === 'PAGE_FIND_RECAP_CARDS') {
       sendResponse({ ok: true, cards: findRecapCards(), url: location.href, pageKind: pageKind() });
+      return;
+    }
+    if (type === 'PAGE_FIND_MEETING_ACTIONS') {
+      sendResponse({
+        ok: true,
+        actions: findMeetingScopedActions(message.meeting),
+        context: getPageContext()
+      });
+      return;
+    }
+    if (type === 'PAGE_GET_CONTEXT') {
+      sendResponse({ ok: true, context: getPageContext() });
       return;
     }
     if (type === 'CALENDAR_FIND_ACTIONS' || type === 'PAGE_FIND_ACTIONS') {

@@ -1,5 +1,5 @@
 const NATIVE_HOST = 'com.openai.teams_recap_transcript_exporter';
-const BATCH_KEY = 'teamsTranscriptBatchStateV4';
+const BATCH_KEY = 'teamsTranscriptBatchStateV5';
 
 let stopRequested = false;
 let runPromise = null;
@@ -408,161 +408,128 @@ async function validateMeetingConversation(tabId, meeting) {
   return { ...verdict, context: response?.context || null };
 }
 
+async function waitForExactMeetingRecap(tabId, meeting, timeoutMs = 20000) {
+  const started = Date.now();
+  let last = null;
+
+  while (Date.now() - started < timeoutMs) {
+    try {
+      last = await sendTab(tabId, {
+        type: 'PAGE_FIND_MEETING_RECAP_EXACT',
+        meeting
+      }, 4000);
+
+      if (last?.match) return last;
+    } catch (_) {}
+
+    await delay(450);
+  }
+
+  return last || { ok: true, match: null, matches: [] };
+}
+
+async function triggerExactActionAndFindRecording(tabId, actionId, meeting) {
+  const source = await chrome.tabs.get(tabId);
+  const before = await chrome.tabs.query({ windowId: source.windowId });
+  const beforeIds = new Set(before.map(t => t.id));
+
+  await sendTab(tabId, { type: 'PAGE_TRIGGER_ACTION', id: actionId }, 5000);
+
+  const started = Date.now();
+  let lastTabs = [];
+
+  while (Date.now() - started < 12000) {
+    const tabs = await chrome.tabs.query({ windowId: source.windowId });
+    lastTabs = tabs;
+
+    const candidates = [
+      ...tabs.filter(t => !beforeIds.has(t.id)),
+      ...tabs.filter(t => t.id === tabId)
+    ];
+
+    for (const tab of candidates) {
+      if (isRecordingUrl(tab.url)) {
+        return [tab.url];
+      }
+    }
+
+    await delay(400);
+  }
+
+  await appendOperation('EXACT_RECORDING_ACTION_NO_URL', {
+    meetingId: meeting.id,
+    actionId,
+    tabs: lastTabs.slice(0, 20).map(t => ({
+      id: t.id,
+      url: t.url || '',
+      title: t.title || ''
+    }))
+  }, 'WARN');
+
+  return [];
+}
+
 async function discoverRecordingUrls(tabId, meeting) {
-  let tab = await chrome.tabs.get(tabId);
+  const tab = await chrome.tabs.get(tabId);
 
   await appendOperation('DISCOVER_RECORDING_START', {
     tabId,
     url: tab.url,
-    meetingId: meeting?.id,
-    meetingDate: meeting?.dateStamp || '',
-    meetingTitle: meeting?.title || ''
+    meetingId: meeting.id,
+    meetingDate: meeting.dateStamp || '',
+    meetingTitle: meeting.title || ''
   });
 
-  if (isRecordingUrl(tab.url)) return [tab.url];
+  const recap = await waitForExactMeetingRecap(tabId, meeting, 20000);
 
-  let scoped = await findMeetingScopedActionsWithWait(tabId, meeting, 7000);
+  await appendOperation('EXACT_RECAP_LOOKUP', {
+    meetingId: meeting.id,
+    pageTitle: recap?.pageTitle || '',
+    url: recap?.url || '',
+    match: recap?.match || null,
+    matches: (recap?.matches || []).slice(0, 10)
+  }, recap?.match ? 'INFO' : 'WARN');
 
-  await appendOperation('MEETING_SCOPED_ACTIONS', {
-    meetingId: meeting?.id,
-    context: scoped?.context || null,
-    actions: (scoped?.actions || []).map(a => ({
-      kind: a.kind,
-      label: a.label,
-      href: a.href || ''
-    }))
-  });
+  if (!recap?.match) return [];
 
-  const scopedActions = scoped?.actions || [];
+  const actions = recap.match.actions || {};
 
-  for (const action of scopedActions.filter(a =>
-    ['recording', 'recap'].includes(a.kind) && a.href
-  )) {
-    const resolved = await resolveHrefForRecordings(action.href, meeting);
-    if (resolved.length) return resolved;
+  // Preferred path: the recap card itself exposes the recording image button.
+  // This is present in both known Teams DOM variants:
+  // meeting-recap-object and meeting-recap-chiclet.
+  if (actions.recordingActionId) {
+    const urls = await triggerExactActionAndFindRecording(
+      tabId,
+      actions.recordingActionId,
+      meeting
+    );
+    if (urls.length) return urls;
   }
 
-  const directButton = scopedActions.find(a =>
-    ['recording', 'recap'].includes(a.kind) && !a.href
-  );
-
-  if (directButton) {
-    const nav = await triggerActionAndCaptureNewTabs(tabId, directButton.id);
-
-    for (const created of nav.created || []) {
-      if (isRecordingUrl(created.url)) return [created.url];
-
-      const resolved = await resolveHrefForRecordings(created.url, meeting);
-      if (resolved.length) return resolved;
-
-      if (/^(chrome|about):/i.test(created.url || '') || !created.url) {
-        try { await chrome.tabs.remove(created.id); } catch (_) {}
-      }
-    }
-
-    tab = nav.current;
-    if (isRecordingUrl(tab.url)) return [tab.url];
-
-    const contextCheck = await validateMeetingConversation(tabId, meeting);
-    if (!contextCheck.ok) {
-      throw new Error(
-        'Открылся другой чат/Recap: "' +
-        (contextCheck.context?.conversationTitle || 'неизвестно') +
-        '" вместо "' + meeting.title + '".'
-      );
-    }
-  }
-
-  if (!directButton) {
-    scoped = await findMeetingScopedActionsWithWait(tabId, meeting, 3500);
-  }
-
-  const chatAction = (scoped?.actions || []).find(a => a.kind === 'chat');
-
-  if (chatAction) {
-    if (chatAction.href) {
-      const resolved = await resolveHrefForRecordings(chatAction.href, meeting);
-      if (resolved.length) return resolved;
-
-      if (/teams\.(?:microsoft\.com|cloud\.microsoft)/i.test(chatAction.href)) {
-        await chrome.tabs.update(tabId, { url: chatAction.href, active: false });
-        await waitTabComplete(tabId, 30000);
-        await delay(1200);
-      }
-    } else {
-      await triggerActionAndCaptureNewTabs(tabId, chatAction.id);
-      await delay(1400);
-    }
-
-    const contextCheck = await validateMeetingConversation(tabId, meeting);
-    if (!contextCheck.ok) {
-      throw new Error(
-        'Открылся другой чат: "' +
-        (contextCheck.context?.conversationTitle || 'неизвестно') +
-        '" вместо "' + meeting.title + '".'
-      );
-    }
-  } else if (!directButton) {
-    await appendOperation('MEETING_CHAT_NOT_FOUND', {
-      meetingId: meeting?.id,
-      title: meeting?.title || ''
+  // Fallback: enter this exact recap card and resolve recording links there.
+  if (actions.recapActionId) {
+    await appendOperation('EXACT_RECAP_FALLBACK', {
+      meetingId: meeting.id,
+      actionId: actions.recapActionId
     }, 'WARN');
-    return [];
-  }
 
-  tab = await chrome.tabs.get(tabId);
-  if (isRecordingUrl(tab.url)) return [tab.url];
+    const nav = await triggerActionAndCaptureNewTabs(tabId, actions.recapActionId);
 
-  const recapCards = await waitForRecapCards(tabId, meeting?.dateStamp, 15000);
+    const candidates = [
+      ...(nav.created || []),
+      nav.current
+    ].filter(Boolean);
 
-  await appendOperation('RECAP_CARDS_RESULT', {
-    meetingId: meeting?.id,
-    meetingDate: meeting?.dateStamp || '',
-    count: recapCards.length,
-    cards: recapCards.slice(0, 20)
-  });
+    for (const candidate of candidates) {
+      if (isRecordingUrl(candidate.url)) return [candidate.url];
 
-  if (!recapCards.length) return [];
-
-  const card = recapCards[0];
-
-  if (card.href) {
-    const resolved = await resolveHrefForRecordings(card.href, meeting);
-    if (resolved.length) return resolved;
-  } else {
-    const nav = await triggerActionAndCaptureNewTabs(tabId, card.id);
-
-    for (const created of nav.created || []) {
-      if (isRecordingUrl(created.url)) return [created.url];
-
-      const resolved = await resolveHrefForRecordings(created.url, meeting);
-      if (resolved.length) return resolved;
-
-      if (/^(chrome|about):/i.test(created.url || '') || !created.url) {
-        try { await chrome.tabs.remove(created.id); } catch (_) {}
+      if (candidate.id) {
+        try {
+          const page = await findActionsWithWait(candidate.id, 10000);
+          const urls = (page?.recordingLinks || []).map(x => x.href).filter(Boolean);
+          if (urls.length) return [...new Set(urls)];
+        } catch (_) {}
       }
-    }
-
-    tab = nav.current;
-    if (isRecordingUrl(tab.url)) return [tab.url];
-
-    const contextCheck = await validateMeetingConversation(tabId, meeting);
-    if (!contextCheck.ok) {
-      throw new Error(
-        'После View recap открыт другой контекст: "' +
-        (contextCheck.context?.conversationTitle || 'неизвестно') + '".'
-      );
-    }
-
-    const page = await findActionsWithWait(tabId, 10000);
-    const urls = (page?.recordingLinks || []).map(x => x.href).filter(Boolean);
-    if (urls.length) return [...new Set(urls)];
-
-    for (const action of (page?.actions || []).filter(a =>
-      a.kind === 'recording' && a.href
-    )) {
-      const resolved = await resolveHrefForRecordings(action.href, meeting);
-      if (resolved.length) return resolved;
     }
   }
 
@@ -738,8 +705,8 @@ async function processMeeting(meeting, index) {
 
     const opened = await sendTab(
       calendarTabId,
-      { type: 'CALENDAR_OPEN_MEETING', meeting },
-      12000
+      { type: 'CALENDAR_OPEN_MEETING_CHAT', meeting },
+      15000
     );
 
     if (!opened?.ok) {
@@ -748,10 +715,10 @@ async function processMeeting(meeting, index) {
         calendarTabId,
         error: opened?.error || ''
       }, 'ERROR');
-      throw new Error(opened?.error || 'Не удалось открыть карточку встречи в календаре.');
+      throw new Error(opened?.error || 'Не удалось открыть чат выбранной встречи из Calendar.');
     }
 
-    await appendOperation('OPEN_MEETING_OK', {
+    await appendOperation('OPEN_MEETING_CHAT_OK', {
       meetingId: meeting.id,
       calendarTabId,
       url: opened.url || '',
@@ -772,12 +739,12 @@ async function processMeeting(meeting, index) {
     if (!urls.length) {
       await appendOperation('MEETING_SKIP', {
         meetingId: meeting.id,
-        reason: 'Не удалось автоматически найти Recap/Transcript для выбранной встречи.'
+        reason: 'Не удалось найти recap-карточку или открыть запись выбранной встречи.'
       }, 'WARN');
 
       await logMeeting(meeting.id, {
         status: 'skip',
-        message: 'Не удалось автоматически найти Recap/Transcript для выбранной встречи.',
+        message: 'Не удалось найти recap-карточку или открыть запись выбранной встречи.',
         files: []
       });
       return;

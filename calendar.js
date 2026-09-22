@@ -2,7 +2,7 @@
   if (window.__teamsTranscriptCalendarLoaded) return;
   window.__teamsTranscriptCalendarLoaded = true;
 
-  const VERSION = '2.0.17';
+  const VERSION = '2.0.18';
   let actionMap = new Map();
   let lastCalendarScanDebug = { rejected: [], candidates: [], acceptedCount: 0 };
 
@@ -663,16 +663,8 @@
   }
 
   async function openCalendarMeeting(meeting) {
-    const el = findMeetingElement(meeting);
-    if (!el) {
-      return { ok: false, error: 'Meeting card not found in current Calendar view.' };
-    }
-
-    try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (_) {}
-    await sleep(120);
-    try { el.focus({ preventScroll: true }); } catch (_) {}
-
     const attempts = [];
+    let lastTarget = null;
 
     async function waitForOpenedState(timeoutMs) {
       const started = Date.now();
@@ -680,69 +672,100 @@
         const chatAction = findChatWithParticipants(meeting);
         if (chatAction) return { mode: 'popup', chatAction };
         if (meetingDetailsViewMatches(meeting)) return { mode: 'details', chatAction: null };
-        await sleep(120);
+        await sleep(140);
       }
       return null;
     }
 
-    // Fluent UI calendar cards may either open a popup or navigate directly
-    // to the full meeting Details page, depending on the Teams build.
-    try {
-      el.click();
-      attempts.push('click');
-    } catch (_) {}
-    let openedState = await waitForOpenedState(1800);
+    async function prepareFreshCard() {
+      if (!visibleCalendarRange()) {
+        const nav = await navigateToCalendar();
+        if (!nav.ok) return null;
+      }
 
-    if (!openedState) {
-      dispatchPointerSequence(el);
-      attempts.push('pointer-sequence');
-      openedState = await waitForOpenedState(1800);
+      if (meeting?.dateStamp) {
+        const ensured = await ensureCalendarDate(meeting.dateStamp);
+        if (!ensured.ok) return null;
+      }
+
+      await sleep(250);
+      return findMeetingElement(meeting);
     }
 
-    if (!openedState) {
+    const methods = ['click', 'pointer-sequence', 'keyboard-enter'];
+
+    for (const method of methods) {
+      const el = await prepareFreshCard();
+      if (!el) {
+        return {
+          ok: false,
+          error: 'Meeting card not found in current Calendar view.',
+          attempts,
+          diagnostic: popupDiagnostic(meeting)
+        };
+      }
+
+      lastTarget = el;
+      try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (_) {}
+      await sleep(150);
+      try { el.focus({ preventScroll: true }); } catch (_) {}
+
+      if (method === 'click') {
+        try { el.click(); } catch (_) { dispatchPointerSequence(el); }
+      } else if (method === 'pointer-sequence') {
+        dispatchPointerSequence(el);
+      } else {
+        try {
+          el.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
+            bubbles: true, cancelable: true, composed: true
+          }));
+          el.dispatchEvent(new KeyboardEvent('keyup', {
+            key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
+            bubbles: true, cancelable: true, composed: true
+          }));
+        } catch (_) {}
+      }
+
+      attempts.push(method);
+      const openedState = await waitForOpenedState(3200);
+      if (openedState) {
+        return {
+          ok: true,
+          mode: openedState.mode,
+          url: location.href,
+          attempts,
+          target: {
+            tag: el.tagName,
+            role: el.getAttribute('role') || '',
+            dataTestId: el.getAttribute('data-testid') || '',
+            elementId: el.id || '',
+            ariaLabel: el.getAttribute('aria-label') || ''
+          }
+        };
+      }
+
+      // A failed activation can leave Teams on the previous meeting details page.
+      // Return to Calendar and reacquire a fresh DOM card before the next attempt.
       try {
-        el.focus({ preventScroll: true });
-        el.dispatchEvent(new KeyboardEvent('keydown', {
-          key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
-          bubbles: true, cancelable: true, composed: true
-        }));
-        el.dispatchEvent(new KeyboardEvent('keyup', {
-          key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
-          bubbles: true, cancelable: true, composed: true
-        }));
-        attempts.push('keyboard-enter');
+        await navigateToCalendar();
+        if (meeting?.dateStamp) await ensureCalendarDate(meeting.dateStamp);
+        await sleep(300);
       } catch (_) {}
-      openedState = await waitForOpenedState(1800);
-    }
-
-    if (!openedState) {
-      return {
-        ok: false,
-        error: 'Meeting view did not become ready after activating Calendar card.',
-        attempts,
-        diagnostic: popupDiagnostic(meeting),
-        target: {
-          tag: el.tagName,
-          role: el.getAttribute('role') || '',
-          dataTestId: el.getAttribute('data-testid') || '',
-          elementId: el.id || '',
-          ariaLabel: el.getAttribute('aria-label') || ''
-        }
-      };
     }
 
     return {
-      ok: true,
-      mode: openedState.mode,
-      url: location.href,
+      ok: false,
+      error: 'Meeting view did not become ready after activating Calendar card.',
       attempts,
-      target: {
-        tag: el.tagName,
-        role: el.getAttribute('role') || '',
-        dataTestId: el.getAttribute('data-testid') || '',
-        elementId: el.id || '',
-        ariaLabel: el.getAttribute('aria-label') || ''
-      }
+      diagnostic: popupDiagnostic(meeting),
+      target: lastTarget ? {
+        tag: lastTarget.tagName,
+        role: lastTarget.getAttribute('role') || '',
+        dataTestId: lastTarget.getAttribute('data-testid') || '',
+        elementId: lastTarget.id || '',
+        ariaLabel: lastTarget.getAttribute('aria-label') || ''
+      } : {}
     };
   }
 

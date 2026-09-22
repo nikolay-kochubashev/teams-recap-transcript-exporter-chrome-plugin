@@ -127,7 +127,7 @@
       running: 'В работе',
       done: 'Готово',
       error: 'Ошибка',
-      skip: 'Нет записи'
+      skip: 'Не найдено'
     };
     return map[status] || status || 'Ожидает';
   }

@@ -47,8 +47,13 @@
   }
 
   async function activeTab() {
+    try {
+      const response = await runtimeMessage({ type: 'SIDE_PANEL_GET_BOUND_TAB' });
+      if (response?.ok && response?.tab?.id) return response.tab;
+    } catch (_) {}
+
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tabs.length) throw new Error('Не удалось определить активную вкладку.');
+    if (!tabs.length) throw new Error('Не удалось определить вкладку Side Panel.');
     return tabs[0];
   }
 

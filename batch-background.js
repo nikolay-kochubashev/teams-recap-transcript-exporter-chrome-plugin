@@ -473,11 +473,83 @@ async function discoverRecordingUrls(tabId, meeting) {
   return [];
 }
 
+function normalizeMeetingKey(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/[“”"'.,;:()\[\]{}]/g, '')
+    .trim();
+}
+
+function meetingMatches(candidate, meeting) {
+  if (!candidate || !meeting) return false;
+
+  if (candidate.id && meeting.id && candidate.id === meeting.id) return true;
+  if (candidate.label && meeting.label && candidate.label === meeting.label) return true;
+
+  const sameDate = !meeting.dateStamp || candidate.dateStamp === meeting.dateStamp;
+  const sameTitle = normalizeMeetingKey(candidate.title) === normalizeMeetingKey(meeting.title);
+  if (sameDate && sameTitle) return true;
+
+  // Time is a useful discriminator, but should not be mandatory because
+  // Teams can change AM/PM formatting between scans.
+  const sameTime = !meeting.startTime || candidate.startTime === meeting.startTime;
+  if (sameDate && sameTime) {
+    const a = normalizeMeetingKey(candidate.title);
+    const m = normalizeMeetingKey(meeting.title);
+    if (a && m && (a.includes(m) || m.includes(a))) return true;
+  }
+
+  return false;
+}
+
+async function scanForMeeting(tabId, meeting) {
+  const response = await sendTab(tabId, { type: 'CALENDAR_SCAN' }, 5000);
+  const candidates = response?.meetings || [];
+  const found = candidates.find(m => meetingMatches(m, meeting)) || null;
+  return { response, candidates, found };
+}
+
 async function restoreCalendarForMeeting(tabId, meeting, timeoutMs = 30000) {
   const started = Date.now();
 
   while (Date.now() - started < timeoutMs) {
     try {
+      // First inspect the page exactly as it is. If the requested week is
+      // already visible, do not touch Calendar navigation at all.
+      const current = await scanForMeeting(tabId, meeting);
+
+      if (current.response?.ok && current.found) {
+        await appendOperation('CALENDAR_MEETING_ALREADY_VISIBLE', {
+          meetingId: meeting.id,
+          dateStamp: meeting.dateStamp,
+          title: meeting.title,
+          found: {
+            id: current.found.id,
+            title: current.found.title,
+            dateStamp: current.found.dateStamp,
+            startTime: current.found.startTime
+          }
+        });
+        return {
+          ok: true,
+          url: current.response.url || '',
+          found: current.found
+        };
+      }
+
+      await appendOperation('CALENDAR_CURRENT_SCAN_NO_MATCH', {
+        meetingId: meeting.id,
+        dateStamp: meeting.dateStamp,
+        title: meeting.title,
+        candidates: current.candidates.slice(0, 30).map(x => ({
+          id: x.id,
+          title: x.title,
+          dateStamp: x.dateStamp,
+          startTime: x.startTime
+        }))
+      }, 'WARN');
+
       const ensured = await sendTab(tabId, {
         type: 'CALENDAR_ENSURE_DATE',
         dateStamp: meeting.dateStamp
@@ -497,16 +569,29 @@ async function restoreCalendarForMeeting(tabId, meeting, timeoutMs = 30000) {
         continue;
       }
 
-      const response = await sendTab(tabId, { type: 'CALENDAR_SCAN' }, 5000);
-      const found = (response?.meetings || []).some(m =>
-        m.id === meeting.id ||
-        (m.label && meeting.label && m.label === meeting.label) ||
-        (m.title === meeting.title && m.dateStamp === meeting.dateStamp && m.startTime === meeting.startTime)
-      );
+      const after = await scanForMeeting(tabId, meeting);
 
-      if (response?.ok && found) {
-        return { ok: true, url: response.url || '', range: ensured.range || null };
+      if (after.response?.ok && after.found) {
+        return {
+          ok: true,
+          url: after.response.url || '',
+          range: ensured.range || null,
+          found: after.found
+        };
       }
+
+      await appendOperation('CALENDAR_SCAN_AFTER_NAV_NO_MATCH', {
+        meetingId: meeting.id,
+        dateStamp: meeting.dateStamp,
+        title: meeting.title,
+        range: ensured.range || null,
+        candidates: after.candidates.slice(0, 30).map(x => ({
+          id: x.id,
+          title: x.title,
+          dateStamp: x.dateStamp,
+          startTime: x.startTime
+        }))
+      }, 'WARN');
     } catch (e) {
       await appendOperation('CALENDAR_ENSURE_DATE_ERROR', {
         meetingId: meeting.id,

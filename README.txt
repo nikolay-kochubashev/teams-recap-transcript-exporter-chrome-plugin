@@ -1,8 +1,11 @@
-Teams Recap Transcript Exporter v2.1.1
+Teams Recap Transcript Exporter v2.2.0
 
 Назначение
 ----------
-Chrome-расширение для экспорта транскрипций Microsoft Teams / SharePoint Recap, в том числе когда Transcript доступен для просмотра, но кнопка Download недоступна.
+Chrome-расширение для сбора рабочих материалов из Microsoft Teams:
+- транскрипции Teams / SharePoint Recap;
+- пакетный экспорт транскрипций встреч из Teams Calendar;
+- собственные сообщения из Teams Search за предыдущую календарную неделю для подготовки отчета о проделанной работе.
 
 Режимы
 ------
@@ -19,9 +22,17 @@ Chrome-расширение для экспорта транскрипций Mic
    - Выбрать встречи.
    - Нажать "Собрать выбранные".
 
+3. Чаты за неделю
+   - Открыть Teams Web.
+   - Открыть Side Panel -> "Чаты за неделю".
+   - Указать имя или фамилию, по которой Teams находит текущего пользователя в People. Значение запоминается.
+   - Нажать "Собрать переписку".
+   - Расширение автоматически выбирает предыдущую календарную неделю: понедельник -> воскресенье.
+   - Результат сохраняется в отдельную папку Windows Documents\Teams Transcripts\<timestamp>.
+
 Side Panel
 ----------
-Начиная с v2.1.0 Side Panel привязан к конкретной вкладке Chrome. В v2.1.1 исправлено открытие tab-scoped панели через toolbar action без потери user gesture.
+Side Panel привязан к конкретной вкладке Chrome.
 
 Как это работает:
 - нажать иконку расширения на нужной вкладке Teams;
@@ -30,10 +41,8 @@ Side Panel
 - при возврате на рабочую вкладку Teams панель снова доступна;
 - если открыть расширение на другой вкладке того же окна, рабочая вкладка Side Panel переносится туда.
 
-Это устраняет ситуацию, когда панель расширения постоянно отображается на всех вкладках одного окна Chrome.
-
-Пакетный workflow
------------------
+Пакетный workflow встреч
+------------------------
 Расширение считывает встречи из видимого диапазона Teams Calendar и для каждой выбранной встречи связывает Calendar occurrence с соответствующим Recap/Transcript.
 
 Основной маршрут:
@@ -41,27 +50,53 @@ Calendar -> конкретная occurrence -> Meeting / Recap -> Transcript -> 
 
 Для повторяющихся встреч учитывается конкретная дата и временное окно встречи из Calendar.
 
-Если внутри одного календарного слота было несколько фактических сессий, например встречу несколько раз запускали и останавливали, экспортируются все Recap/Transcript, пересекающиеся с этим временным окном.
+Если внутри одного календарного слота было несколько фактических сессий, экспортируются все Recap/Transcript, пересекающиеся с этим временным окном.
 
 Если внутри одной фактической сессии несколько Transcript, экспортируются все найденные Transcript.
 
 Ошибка одной встречи не останавливает весь batch.
 
-Результат batch
----------------
-Windows Documents\Teams Transcripts\YYYYMMDD-HHmmss\
+Workflow чатов
+--------------
+Режим "Чаты за неделю" использует штатный Teams Search, а не прямой Microsoft Graph API.
 
-Примеры файлов:
+Маршрут:
+Teams Search -> People / From текущего пользователя -> Date предыдущей недели -> Messages -> все страницы результатов -> TXT.
+
+Используемые стабильные DOM-маркеры Teams:
+- AUTOSUGGEST_INPUT;
+- AUTOSUGGEST_ACTION_PEOPLECENTRICSEARCH;
+- search-people-filter;
+- search-date-filter;
+- messages-tab;
+- more-Messages;
+- search-card;
+- message-app-card-header;
+- search-pagination-previous-next.
+
+Сообщения дедуплицируются по message id, если он доступен, иначе по содержимому карточки.
+
+Результат содержит:
+- период;
+- автора;
+- количество сообщений;
+- количество чатов/каналов;
+- список чатов/каналов;
+- для каждого результата время, чат/канал, текст сообщения и найденные URL.
+
+Важно: Teams Search иногда возвращает длинное сообщение как сокращенный preview с "...". Версия 2.2.0 сохраняет именно текст, который отдает Search result card, без открытия каждого сообщения в исходном чате.
+
+Результаты
+----------
+Транскрипции и недельная переписка сохраняются через Windows helper в Documents\Teams Transcripts.
+
+Примеры:
 - <Meeting title> - YYYYMMDD.txt
 - <Meeting title> - YYYYMMDD - HHMM-HHMM.txt
-- <Meeting title> - YYYYMMDD - HHMM-HHMM_02.txt
+- Teams messages - YYYYMMDD-YYYYMMDD.txt
 - batch-report.txt
 - batch-operation-log.txt
-
-Статусы:
-- DONE - все найденные транскрипции встречи сохранены
-- SKIP - подходящий Recap/Transcript не найден
-- ERROR - встреча найдена, но обработать ее не удалось
+- chat-operation-log.txt
 
 Установка расширения
 --------------------
@@ -76,29 +111,26 @@ Windows Documents\Teams Transcripts\YYYYMMDD-HHmmss\
 
 Windows helper
 --------------
-Для пакетного режима Windows helper обязателен.
-
-После перехода с v1.x на v2.x один раз повторно запустить:
-
-Install-Windows-Integration.cmd
+Для пакетного режима встреч и режима чатов Windows helper обязателен.
 
 Helper работает on-demand: Chrome запускает его только на время файловой операции.
 Он не устанавливается как Windows Service и не висит постоянно в фоне.
 
+Для v2.2.0 NativeHost.cs не менялся, поэтому повторная установка helper после v2.1.x не требуется.
+
 Диагностика
 -----------
-При пакетном запуске автоматически создается batch-operation-log.txt.
+Для встреч создается batch-operation-log.txt.
 
-Лог содержит:
-- распознанную Calendar occurrence;
-- дату и временное окно встречи;
-- найденные Recap-сессии;
-- выбранные Transcript;
-- frame, в котором реально загружена транскрипция;
-- результаты навигации и fallback;
-- ошибки по каждому шагу.
-
-Кнопка "Диагностика календаря" используется, если встречи не определяются или изменилась DOM-разметка Teams.
+Для чатов создается chat-operation-log.txt. В Side Panel также есть кнопка "Скопировать диагностику", которая собирает состояние Teams Search DOM:
+- найден ли Search input;
+- From filter;
+- Date filter;
+- количество search-card;
+- распарсенные сообщения;
+- наличие pagination;
+- состояние Next;
+- sample результатов.
 
 Техническая архитектура
 -----------------------
@@ -106,14 +138,19 @@ Helper работает on-demand: Chrome запускает его только
 - background.js - lifecycle расширения и tab-scoped Side Panel
 - content.js - lazy-loading Transcript collector для Teams / SharePoint frames
 - calendar.js - DOM adapter и UI automation Teams Calendar / Meeting / Recap
-- batch-background.js - batch coordinator и state machine
-- batch-panel.js - UI пакетного режима
+- batch-background.js - coordinator пакетного экспорта встреч
+- batch-panel.js - UI пакетного режима встреч
+- chat-search.js - DOM adapter Teams Search
+- chat-background.js - coordinator недельного экспорта сообщений
+- chat-panel.js - UI режима "Чаты за неделю"
 - NativeHost.cs - сохранение файлов в Windows Documents
-- chrome.storage.local - состояние пакетного запуска
+- chrome.storage.local - состояния batch/chat и сохраненное имя пользователя
 - chrome.storage.session - текущая вкладка-владелец Side Panel
 
 Ограничения
 -----------
-Teams Web не предоставляет стабильный публичный DOM-контракт для Calendar / Meeting / Recap, поэтому адаптер может потребовать обновления при изменениях интерфейса Microsoft.
+Teams Web не предоставляет стабильный публичный DOM-контракт для Calendar / Search / Meeting / Recap, поэтому DOM adapters могут потребовать обновления при изменениях интерфейса Microsoft.
 
-Текущий batch использует живой DOM вкладки Teams. Chrome может throttling/freeze неактивные вкладки. Переключение на другие вкладки обычно допустимо, но пока не гарантируется полностью resumable-выполнение после freeze/discard вкладки. Архитектура с checkpoint/retry orchestration является отдельным следующим этапом.
+Текущие batch workflow используют живой DOM вкладки Teams. Chrome может throttling/freeze неактивные вкладки. Полностью resumable orchestration после freeze/discard вкладки пока не реализован.
+
+Teams Search может обрезать длинные сообщения в карточке результата. Для подготовки отчета обычно достаточно поискового preview; получение полного текста каждого длинного сообщения потребует отдельного перехода к исходному сообщению.

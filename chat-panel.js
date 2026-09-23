@@ -112,8 +112,8 @@
   startBtn.addEventListener('click', async () => {
     try {
       const tab = await boundTab();
-      if (!/^https:\/\/(?:[^/]+\.)?teams\.(?:cloud\.)?microsoft\//i.test(tab.url || '') &&
-          !/^https:\/\/teams\.cloud\.microsoft\//i.test(tab.url || '')) {
+      if (!/^https:\/\/(?:[^/]+\.)?teams\.microsoft\.com\//i.test(tab.url || '') &&
+          !/^https:\/\/(?:[^/]+\.)?teams\.cloud\.microsoft\//i.test(tab.url || '')) {
         throw new Error('Открой обычную вкладку Teams Web.');
       }
 

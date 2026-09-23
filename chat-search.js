@@ -220,19 +220,26 @@
     });
 
     if (!apply) throw new Error('Кнопка Apply в фильтре Date не найдена.');
-    if (apply.disabled) {
+
+    await waitFor(() => !apply.disabled ? apply : null, 4000).catch(() => {
       throw new Error('Teams не принял диапазон дат. Нужна диагностика Date filter.');
-    }
+    });
 
     clickElement(apply);
 
-    await waitFor(() => {
+    const appliedButton = await waitFor(() => {
       const visiblePopup = findDatePopup();
       const button = Array.from(document.querySelectorAll('button[data-tid="search-date-filter"]'))
         .find(isRendered);
       const label = normalize(button?.getAttribute('aria-label'));
-      return !visiblePopup && button && !/^Date filter$/i.test(label) ? button : null;
+      const hasFrom = label.toLocaleLowerCase().includes(fromText.toLocaleLowerCase());
+      const hasTo = label.toLocaleLowerCase().includes(toText.toLocaleLowerCase());
+      return !visiblePopup && button && hasFrom && hasTo ? button : null;
     }, 10000).catch(() => null);
+
+    if (!appliedButton) {
+      throw new Error('Teams закрыл Date filter, но примененный диапазон не подтвержден. Сбор остановлен, чтобы не сохранить сообщения за неверные даты.');
+    }
 
     return { fromText, toText };
   }

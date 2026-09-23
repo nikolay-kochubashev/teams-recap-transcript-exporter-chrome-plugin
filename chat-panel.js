@@ -1,5 +1,6 @@
 (() => {
   let pollTimer = null;
+  let localStatusUntil = 0;
 
   const section = document.getElementById('chatSection');
   const authorInput = document.getElementById('chatAuthor');
@@ -23,8 +24,13 @@
   }
 
   async function boundTab() {
-    const response = await runtimeMessage({ type: 'SIDE_PANEL_GET_BOUND_TAB' });
-    if (response?.ok && response?.tab?.id) return response.tab;
+    // SIDE_PANEL_GET_BOUND_TAB пока не реализован background.js.
+    // Поэтому запрос может завершиться chrome.runtime.lastError. Это штатный
+    // случай: используем активную вкладку того же окна, как уже делает panel.js.
+    try {
+      const response = await runtimeMessage({ type: 'SIDE_PANEL_GET_BOUND_TAB' });
+      if (response?.ok && response?.tab?.id) return response.tab;
+    } catch (_) {}
 
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tabs.length) throw new Error('Не удалось определить вкладку Teams.');
@@ -72,6 +78,11 @@
     return '';
   }
 
+  function showLocalStatus(message, ttlMs = 5000) {
+    localStatusUntil = Date.now() + ttlMs;
+    statusEl.textContent = message;
+  }
+
   function render(state) {
     const running = state?.status === 'running';
     startBtn.disabled = running;
@@ -79,7 +90,9 @@
     openFolderBtn.disabled = !state?.folderPath;
     diagnosticBtn.disabled = running;
 
-    statusEl.textContent = state?.message || 'Готово к сбору переписки.';
+    if (Date.now() >= localStatusUntil || running || state?.status === 'done' || state?.status === 'error') {
+      statusEl.textContent = state?.message || 'Готово к сбору переписки.';
+    }
     const progress = Math.max(0, Math.min(100, Number(state?.progress || 0)));
     progressBar.style.width = progress + '%';
 
@@ -100,7 +113,7 @@
       const response = await runtimeMessage({ type: 'CHAT_GET_STATE' });
       if (response?.ok) render(response.state);
     } catch (e) {
-      statusEl.textContent = 'Ошибка: ' + (e.message || e);
+      showLocalStatus('Ошибка: ' + (e.message || e));
     }
   }
 
@@ -135,6 +148,7 @@
       });
 
       if (!response?.ok) throw new Error(response?.error || 'Не удалось запустить сбор.');
+      localStatusUntil = 0;
       statusEl.textContent = 'Запускаю сбор переписки...';
       ensurePolling();
       setTimeout(refresh, 250);
@@ -169,7 +183,7 @@
       await navigator.clipboard.writeText(response.text || '');
       statusEl.textContent = 'Диагностика Teams Search скопирована в буфер обмена.';
     } catch (e) {
-      statusEl.textContent = 'Ошибка диагностики: ' + (e.message || e);
+      showLocalStatus('Ошибка диагностики: ' + (e.message || e));
     }
   });
 

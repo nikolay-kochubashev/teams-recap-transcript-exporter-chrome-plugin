@@ -13,6 +13,7 @@
     <div class="mode-tabs">
       <button id="modeCurrent" class="mode-tab active">Текущая встреча</button>
       <button id="modeBatch" class="mode-tab">Пакет из календаря</button>
+      <button id="modeChat" class="mode-tab">Чаты за неделю</button>
     </div>
 
     <section id="currentSection">
@@ -81,8 +82,36 @@
 
       <div id="batchLog" class="batch-log"></div>
     </section>
+
+    <section id="chatSection" hidden>
+      <p class="hint">Собирает сообщения, которые ты отправлял в Teams за предыдущую календарную неделю. Используется штатный Teams Search: From -> Date -> Messages -> все страницы результатов.</p>
+
+      <label class="field-label" for="chatAuthor">Имя или фамилия в Teams</label>
+      <input id="chatAuthor" class="text-input" type="text" placeholder="Например: Кочубашев Николай Павлович" autocomplete="off" />
+
+      <div id="chatPeriod" class="period-label"></div>
+
+      <div class="actions primary-actions">
+        <button id="startChatExport" class="primary">Собрать переписку</button>
+        <button id="stopChatExport" disabled>Остановить</button>
+      </div>
+
+      <div class="progress-wrap">
+        <div class="progress"><div id="chatProgressBar"></div></div>
+        <div id="chatMetrics" class="progress-text"></div>
+      </div>
+
+      <div id="chatStatus" class="status">Готово к сбору переписки.</div>
+      <div class="save-mode">Результат сохраняется в Windows Documents\Teams Transcripts\&lt;timestamp&gt;.</div>
+
+      <div class="actions">
+        <button id="openChatFolder" disabled>Открыть папку</button>
+        <button id="chatDiagnostic">Скопировать диагностику</button>
+      </div>
+    </section>
   </main>
   <script src="panel.js"></script>
   <script src="batch-panel.js"></script>
+  <script src="chat-panel.js"></script>
 </body>
 </html>

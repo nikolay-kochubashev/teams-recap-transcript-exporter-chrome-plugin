@@ -1,5 +1,12 @@
 (() => {
-  const VERSION = '2.2.0';
+  const VERSION = '2.2.2';
+  const debugState = {
+    stage: 'idle',
+    lastQuery: '',
+    queryCandidates: [],
+    peopleActions: 0,
+    error: ''
+  };
 
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -134,49 +141,103 @@
     return '';
   }
 
-  async function openPeopleCentricSearch(query) {
-    const input = await ensureSearchInput();
-    input.focus();
-    setInputValue(input, '');
-    await sleep(80);
-    setInputValue(input, query);
+  function peopleQueryCandidates(query) {
+    const full = normalize(query);
+    const first = normalize(full.split(/\s+/)[0] || '');
+    const short = first.length > 8 ? first.slice(0, 8) : first;
 
-    await waitFor(() => {
-      const popup = document.querySelector('[data-tid="ms-searchux-popup"]');
-      return popup && isRendered(popup) && personSearchActions().length ? popup : null;
-    }, 12000);
+    return Array.from(new Set([first, short, full].filter(x => x.length >= 3)));
+  }
 
-    const detected = selfSuggestionName();
-    const desired = (detected || query || '').toLocaleLowerCase();
-    const actions = personSearchActions();
+  async function waitForPeopleAction(desired, timeout = 4500) {
+    const started = Date.now();
 
-    let action = actions.find(el => {
-      const label = normalize(el.getAttribute('aria-label')).toLocaleLowerCase();
-      return desired && label.includes(desired);
-    });
+    while (Date.now() - started < timeout) {
+      const actions = personSearchActions();
+      debugState.peopleActions = actions.length;
 
-    if (!action && detected) {
-      action = actions.find(el =>
-        normalize(el.getAttribute('aria-label')).toLocaleLowerCase().includes(detected.toLocaleLowerCase())
-      );
+      let action = actions.find(el => {
+        const label = normalize(el.getAttribute('aria-label')).toLocaleLowerCase();
+        return desired && label.includes(desired.toLocaleLowerCase());
+      });
+
+      if (!action) {
+        const detected = selfSuggestionName();
+        if (detected) {
+          action = actions.find(el =>
+            normalize(el.getAttribute('aria-label')).toLocaleLowerCase()
+              .includes(detected.toLocaleLowerCase())
+          );
+        }
+      }
+
+      if (!action && actions.length === 1) action = actions[0];
+      if (action) return action;
+
+      await sleep(120);
     }
-    if (!action && actions.length === 1) action = actions[0];
+
+    return null;
+  }
+
+  async function openPeopleCentricSearch(query) {
+    debugState.stage = 'people-search';
+    debugState.error = '';
+
+    const input = await ensureSearchInput();
+    const candidates = peopleQueryCandidates(query);
+    debugState.queryCandidates = candidates;
+
+    if (!candidates.length) {
+      throw new Error('Не удалось сформировать поисковый запрос для People.');
+    }
+
+    let action = null;
+    let usedQuery = '';
+
+    for (const candidate of candidates) {
+      debugState.lastQuery = candidate;
+      usedQuery = candidate;
+
+      input.focus();
+      setInputValue(input, '');
+      await sleep(120);
+      setInputValue(input, candidate);
+
+      action = await waitForPeopleAction(candidate, 4500);
+      if (action) break;
+    }
 
     if (!action) {
-      throw new Error('Не найден результат People для текущего пользователя. Укажи точнее имя или фамилию в Teams.');
+      debugState.error = 'people-autosuggest-not-found';
+      throw new Error(
+        'Teams не показал People autosuggest для текущего пользователя. ' +
+        'Пробовал: ' + candidates.join(', ') + '.'
+      );
     }
 
     const label = normalize(action.getAttribute('aria-label'));
-    const author = label.replace(/^All results from\s+/i, '').trim() || detected || query;
+    const author = label.replace(/^All results from\s+/i, '').trim() ||
+      selfSuggestionName() || query;
 
+    debugState.stage = 'open-people-result';
     clickElement(action);
 
-    await waitFor(() => {
-      const content = document.querySelector('[data-tid="search-content"]');
-      const filter = document.querySelector('button[data-tid="search-people-filter"]');
-      return content && filter && isRendered(content) ? content : null;
-    }, 18000);
+    try {
+      await waitFor(() => {
+        const content = document.querySelector('[data-tid="search-content"]');
+        const filter = document.querySelector('button[data-tid="search-people-filter"]');
+        return content && filter && isRendered(content) ? content : null;
+      }, 18000);
+    } catch (_) {
+      debugState.error = 'search-results-not-opened';
+      throw new Error(
+        'Teams принял People result, но страница Search Results не открылась. ' +
+        'Последний запрос: ' + usedQuery + '.'
+      );
+    }
 
+    debugState.stage = 'people-filter-ready';
     return author;
   }
 
@@ -373,6 +434,8 @@
   }
 
   async function prepareSearch(request) {
+    debugState.stage = 'prepare';
+    debugState.error = '';
     const requested = normalize(request?.authorQuery);
     const autoDetected = detectSelfName();
     const query = requested || autoDetected;
@@ -382,8 +445,11 @@
     }
 
     const author = await openPeopleCentricSearch(query);
+    debugState.stage = 'date-filter';
     const dateRange = await applyDateRange(request.startDate, request.endDate);
+    debugState.stage = 'messages-results';
     await openMessagesResults();
+    debugState.stage = 'ready';
 
     return {
       ok: true,
@@ -418,6 +484,11 @@
 
     const info = {
       version: VERSION,
+      stage: debugState.stage,
+      lastQuery: debugState.lastQuery,
+      queryCandidates: debugState.queryCandidates,
+      peopleActions: debugState.peopleActions,
+      adapterError: debugState.error,
       url: location.href,
       title: document.title,
       lang: document.documentElement.lang || '',

@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = '2.2.2';
+  const VERSION = '2.2.3';
   const debugState = {
     stage: 'idle',
     lastQuery: '',
@@ -124,9 +124,25 @@
   }
 
   function personSearchActions() {
-    return Array.from(document.querySelectorAll(
-      'button[data-tid="AUTOSUGGEST_ACTION_PEOPLECENTRICSEARCH"]'
-    )).filter(isRendered);
+    const selectors = [
+      'button[data-tid="AUTOSUGGEST_ACTION_PEOPLECENTRICSEARCH"]',
+      'button[aria-label^="All results from "]',
+      '[aria-label^="All results from "] > button',
+      '[aria-label^="All results from "] button'
+    ];
+
+    const seen = new Set();
+    const result = [];
+
+    for (const selector of selectors) {
+      for (const el of document.querySelectorAll(selector)) {
+        if (seen.has(el) || !isRendered(el)) continue;
+        seen.add(el);
+        result.push(el);
+      }
+    }
+
+    return result;
   }
 
   function selfSuggestionName() {
@@ -157,7 +173,12 @@
       debugState.peopleActions = actions.length;
 
       let action = actions.find(el => {
-        const label = normalize(el.getAttribute('aria-label')).toLocaleLowerCase();
+        const label = normalize(
+          el.getAttribute('aria-label') ||
+          el.closest('[aria-label^="All results from "]')?.getAttribute('aria-label') ||
+          el.parentElement?.getAttribute('aria-label') ||
+          ''
+        ).toLocaleLowerCase();
         return desired && label.includes(desired.toLocaleLowerCase());
       });
 
@@ -216,7 +237,12 @@
       );
     }
 
-    const label = normalize(action.getAttribute('aria-label'));
+    const label = normalize(
+      action.getAttribute('aria-label') ||
+      action.closest('[aria-label^="All results from "]')?.getAttribute('aria-label') ||
+      action.parentElement?.getAttribute('aria-label') ||
+      ''
+    );
     const author = label.replace(/^All results from\s+/i, '').trim() ||
       selfSuggestionName() || query;
 
@@ -488,6 +514,14 @@
       lastQuery: debugState.lastQuery,
       queryCandidates: debugState.queryCandidates,
       peopleActions: debugState.peopleActions,
+      allResultsWrappers: Array.from(document.querySelectorAll('[aria-label^="All results from "]'))
+        .filter(isRendered)
+        .slice(0, 10)
+        .map(el => ({
+          tag: el.tagName,
+          aria: normalize(el.getAttribute('aria-label')),
+          dataTid: el.getAttribute('data-tid') || ''
+        })),
       adapterError: debugState.error,
       url: location.href,
       title: document.title,

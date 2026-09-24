@@ -15,8 +15,10 @@
       startDate: '',
       endDate: '',
       pages: 0,
+      searchHitCount: 0,
       messageCount: 0,
       conversationCount: 0,
+      contextConversationCount: 0,
       progress: 0,
       folderPath: '',
       filePath: '',
@@ -54,7 +56,10 @@
     try {
       return await chrome.tabs.sendMessage(tabId, message);
     } catch (e) {
-      throw new Error('Не удалось связаться со вкладкой Teams. Обнови вкладку после обновления расширения. ' + (e.message || e));
+      throw new Error(
+        'Не удалось связаться со вкладкой Teams. Обнови вкладку после обновления расширения. ' +
+        (e.message || e)
+      );
     }
   }
 
@@ -64,12 +69,12 @@
   }
 
   function safeFileName(value) {
-    return String(value || 'Teams messages')
+    return String(value || 'Teams chats')
       .replace(/[\\/:*?"<>|]+/g, '-')
       .replace(/\s+/g, ' ')
       .replace(/[. ]+$/g, '')
       .trim()
-      .slice(0, 170) || 'Teams messages';
+      .slice(0, 170) || 'Teams chats';
   }
 
   function uniqueKey(item) {
@@ -81,46 +86,114 @@
     ].join('|');
   }
 
-  function buildText(state, messages) {
-    const conversations = Array.from(new Set(
-      messages.map(x => x.conversation).filter(Boolean)
-    )).sort((a, b) => a.localeCompare(b, 'ru'));
+  function conversationKey(value) {
+    return String(value || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase();
+  }
 
-    const ordered = messages.slice().reverse();
+  function addLinks(out, links) {
+    const unique = Array.from(new Set(links || [])).filter(Boolean);
+    if (!unique.length) return;
+    out.push('Links:');
+    unique.forEach(link => out.push('- ' + link));
+  }
+
+  function buildText(state, searchHits, contexts, contextFailures) {
+    const hitsByConversation = new Map();
+    for (const hit of searchHits) {
+      const name = String(hit.conversation || '').trim() || '(чат не определен)';
+      const key = conversationKey(name);
+      if (!hitsByConversation.has(key)) hitsByConversation.set(key, { name, items: [] });
+      hitsByConversation.get(key).items.push(hit);
+    }
+
+    const allKeys = new Set([
+      ...hitsByConversation.keys(),
+      ...contexts.keys(),
+      ...contextFailures.keys()
+    ]);
+
+    const groups = Array.from(allKeys).map(key => {
+      const fallback = hitsByConversation.get(key);
+      const context = contexts.get(key);
+      return {
+        key,
+        name: context?.conversation || fallback?.name || key || '(чат не определен)',
+        context,
+        fallback: fallback?.items || [],
+        failure: contextFailures.get(key) || ''
+      };
+    }).sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+
+    let savedMessages = 0;
+    for (const group of groups) {
+      savedMessages += group.context?.messages?.length || group.fallback.length;
+    }
+
     const out = [
-      'Teams messages for work report',
+      'Teams chats for work report',
       'Period: ' + stampDisplay(state.startDate) + ' - ' + stampDisplay(state.endDate),
-      'Author: ' + (state.author || state.authorQuery || ''),
-      'Messages: ' + ordered.length,
-      'Conversations: ' + conversations.length,
+      'Author used for discovery: ' + (state.author || state.authorQuery || ''),
+      'Search hits from author: ' + searchHits.length,
+      'Conversations: ' + groups.length,
+      'Full-context conversations: ' + contexts.size,
+      'Fallback conversations: ' + contextFailures.size,
+      'Messages saved: ' + savedMessages,
       '',
       'Conversations:',
-      ...conversations.map(x => '- ' + x),
-      '',
-      'Messages',
-      '========',
+      ...groups.map(x => '- ' + x.name),
       ''
     ];
 
-    ordered.forEach((item, index) => {
-      const head = [
-        item.timestamp ? '[' + item.timestamp + ']' : '',
-        item.conversation || '',
-        item.sender && item.sender !== state.author ? '- ' + item.sender : ''
-      ].filter(Boolean).join(' ');
+    for (const group of groups) {
+      out.push('============================================================');
+      out.push(group.name);
+      out.push('============================================================');
 
-      out.push(head || ('Message ' + (index + 1)));
-      out.push(item.message || '');
+      if (group.context?.messages?.length) {
+        out.push('Source: full Teams conversation for selected period');
+        out.push('');
 
-      const links = Array.from(new Set(item.links || []));
-      if (links.length) {
-        out.push('Links:');
-        links.forEach(link => out.push('- ' + link));
+        for (const message of group.context.messages) {
+          out.push(
+            '[' + (message.timestamp || message.dateTime || '') + '] ' +
+            (message.author || 'Unknown')
+          );
+
+          if (message.quote?.preview) {
+            const quoteHead = [
+              message.quote.author || '',
+              message.quote.timestamp ? '[' + message.quote.timestamp + ']' : ''
+            ].filter(Boolean).join(' ');
+            out.push('Reply to ' + (quoteHead || 'message') + ': ' + message.quote.preview);
+          }
+
+          if (message.message) out.push(message.message);
+          addLinks(out, message.links);
+          out.push('');
+        }
+      } else {
+        out.push('Source: Teams Search fallback - полный контекст чата открыть не удалось.');
+        if (group.failure) out.push('Reason: ' + group.failure);
+        out.push('');
+
+        const fallback = group.fallback.slice().reverse();
+        for (const item of fallback) {
+          out.push(
+            (item.timestamp ? '[' + item.timestamp + '] ' : '') +
+            (item.sender || state.author || '')
+          );
+          if (item.message) out.push(item.message);
+          addLinks(out, item.links);
+          out.push('');
+        }
       }
-      out.push('');
-    });
+    }
 
-    return out.join('\n').trim() + '\n';
+    return {
+      text: out.join('\n').trim() + '\n',
+      savedMessages,
+      conversationCount: groups.length
+    };
   }
 
   function buildLog(entries, state) {
@@ -143,7 +216,10 @@
     stopRequested = false;
     const startedAt = new Date().toISOString();
     const log = [];
-    const seen = new Map();
+    const seenSearch = new Map();
+    const contexts = new Map();
+    const contextFailures = new Map();
+    const attemptedContexts = new Set();
 
     const addLog = (step, data) => {
       log.push({ ts: new Date().toISOString(), step, data: data || {} });
@@ -158,8 +234,10 @@
       startDate: request.startDate,
       endDate: request.endDate,
       pages: 0,
+      searchHitCount: 0,
       messageCount: 0,
       conversationCount: 0,
+      contextConversationCount: 0,
       progress: 2,
       folderPath: '',
       filePath: '',
@@ -197,7 +275,7 @@
       state = await patchState({
         author: prepared.author || request.authorQuery || '',
         authorQuery: prepared.query || request.authorQuery || '',
-        message: 'Фильтры применены. Собираю страницы результатов...',
+        message: 'Фильтры применены. Ищу переписки и собираю полный контекст...',
         progress: 12
       });
       addLog('SEARCH_READY', prepared);
@@ -214,30 +292,99 @@
         let added = 0;
         for (const item of result.items || []) {
           const key = uniqueKey(item);
-          if (!key || seen.has(key)) continue;
-          seen.set(key, item);
+          if (!key || seenSearch.has(key)) continue;
+          seenSearch.set(key, item);
           added++;
         }
 
-        const conversations = new Set(Array.from(seen.values()).map(x => x.conversation).filter(Boolean));
-        const progress = Math.min(92, 12 + page * 5);
+        const knownConversations = new Set(
+          Array.from(seenSearch.values())
+            .map(x => String(x.conversation || '').trim())
+            .filter(Boolean)
+            .map(conversationKey)
+        );
 
         state = await patchState({
           pages: page,
-          messageCount: seen.size,
-          conversationCount: conversations.size,
-          progress,
-          message: 'Страница ' + page + ': сообщений ' + seen.size + ', чатов ' + conversations.size + '.'
+          searchHitCount: seenSearch.size,
+          conversationCount: knownConversations.size,
+          contextConversationCount: contexts.size,
+          messageCount: Array.from(contexts.values())
+            .reduce((sum, x) => sum + (x.messages?.length || 0), 0),
+          progress: Math.min(92, 12 + page * 5),
+          message:
+            'Страница поиска ' + page +
+            ': моих сообщений ' + seenSearch.size +
+            ', переписок ' + knownConversations.size +
+            ', контекст собран для ' + contexts.size + '.'
         });
 
         addLog('PAGE_COLLECTED', {
           page,
           pageItems: result.count || 0,
           added,
-          total: seen.size,
+          total: seenSearch.size,
           hasNext: !!result.hasNext,
           signature: result.signature || ''
         });
+
+        const pageConversations = new Map();
+        for (const item of result.items || []) {
+          const name = String(item.conversation || '').trim();
+          if (!name) continue;
+          const key = conversationKey(name);
+          if (!pageConversations.has(key)) pageConversations.set(key, item);
+        }
+
+        for (const [key, item] of pageConversations.entries()) {
+          if (stopRequested) throw new Error('Остановлено пользователем.');
+          if (attemptedContexts.has(key)) continue;
+          attemptedContexts.add(key);
+
+          await patchState({
+            message: 'Открываю переписку: ' + item.conversation,
+            contextConversationCount: contexts.size
+          });
+
+          const context = await sendToTab(request.tabId, {
+            type: 'CHAT_COLLECT_CONVERSATION_CONTEXT',
+            item,
+            startDate: request.startDate,
+            endDate: request.endDate
+          });
+
+          if (context?.ok) {
+            const normalized = Object.assign({}, context, {
+              conversation: context.conversation || item.conversation
+            });
+            contexts.set(key, normalized);
+
+            addLog('CONVERSATION_CONTEXT_COLLECTED', {
+              conversation: normalized.conversation,
+              messages: normalized.count || normalized.messages?.length || 0,
+              loaded: normalized.loaded || 0,
+              reachedStart: !!normalized.reachedStart,
+              reachedEnd: !!normalized.reachedEnd
+            });
+
+            await patchState({
+              contextConversationCount: contexts.size,
+              messageCount: Array.from(contexts.values())
+                .reduce((sum, x) => sum + (x.messages?.length || 0), 0),
+              message:
+                'Контекст: ' + normalized.conversation +
+                ' - сообщений за период ' + (normalized.count || normalized.messages?.length || 0) + '.'
+            });
+          } else {
+            const reason = context?.error || 'Контекст переписки не получен.';
+            contextFailures.set(key, reason);
+            addLog('CONVERSATION_CONTEXT_FAILED', {
+              conversation: item.conversation,
+              error: reason,
+              diagnostic: context?.diagnostic || ''
+            });
+          }
+        }
 
         if (!result.hasNext) break;
 
@@ -251,26 +398,52 @@
 
       if (stopRequested) throw new Error('Остановлено пользователем.');
 
+      const searchHits = Array.from(seenSearch.values());
+
+      // Ensure every discovered named conversation has a result in either
+      // full-context or fallback maps.
+      for (const hit of searchHits) {
+        const name = String(hit.conversation || '').trim();
+        if (!name) continue;
+        const key = conversationKey(name);
+        if (!contexts.has(key) && !contextFailures.has(key)) {
+          contextFailures.set(key, 'Контекст не был открыт во время прохода Search.');
+        }
+      }
+
       const finishedAt = new Date().toISOString();
       state = await patchState({ finishedAt });
-      const messages = Array.from(seen.values());
-      const text = buildText(state, messages);
-      const fileName = safeFileName('Teams messages - ' + state.startDate + '-' + state.endDate) + '.txt';
+
+      const built = buildText(state, searchHits, contexts, contextFailures);
+      const fileName = safeFileName(
+        'Teams chats - ' + state.startDate + '-' + state.endDate
+      ) + '.txt';
 
       const saved = await nativeMessage({
         action: 'saveTextInFolder',
         folderPath: state.folderPath,
         fileName,
-        text
+        text: built.text
       });
 
-      addLog('MESSAGES_SAVED', { path: saved.path, messages: messages.length });
+      addLog('CHATS_SAVED', {
+        path: saved.path,
+        searchHits: searchHits.length,
+        conversations: built.conversationCount,
+        fullContextConversations: contexts.size,
+        fallbackConversations: contextFailures.size,
+        messages: built.savedMessages
+      });
 
       const finalState = await patchState({
         status: 'done',
-        message: 'Готово. Собрано сообщений: ' + messages.length + '.',
-        messageCount: messages.length,
-        conversationCount: new Set(messages.map(x => x.conversation).filter(Boolean)).size,
+        message:
+          'Готово. Переписок: ' + built.conversationCount +
+          ', сообщений с контекстом: ' + built.savedMessages + '.',
+        searchHitCount: searchHits.length,
+        messageCount: built.savedMessages,
+        conversationCount: built.conversationCount,
+        contextConversationCount: contexts.size,
         progress: 100,
         filePath: saved.path,
         finishedAt
@@ -295,7 +468,7 @@
         message: stopped ? 'Сбор переписки остановлен.' : 'Ошибка: ' + (error?.message || error),
         error: stopped ? '' : (error?.message || String(error)),
         finishedAt,
-        progress: stopped ? state.progress || 0 : state.progress || 0
+        progress: state.progress || 0
       });
 
       if (state.folderPath) {

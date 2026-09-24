@@ -1,11 +1,11 @@
-Teams Recap Transcript Exporter v2.2.4
+Teams Recap Transcript Exporter v2.3.0
 
 Назначение
 ----------
 Chrome-расширение для сбора рабочих материалов из Microsoft Teams:
 - транскрипции Teams / SharePoint Recap;
 - пакетный экспорт транскрипций встреч из Teams Calendar;
-- собственные сообщения из Teams Search за предыдущую календарную неделю для подготовки отчета о проделанной работе.
+- переписки Teams за предыдущую календарную неделю с полным контекстом сообщений участников для подготовки отчета о проделанной работе.
 
 Режимы
 ------
@@ -61,7 +61,7 @@ Workflow чатов
 Режим "Чаты за неделю" использует штатный Teams Search, а не прямой Microsoft Graph API.
 
 Маршрут:
-Teams Search -> People / From текущего пользователя -> Date предыдущей недели -> Messages -> все страницы результатов -> TXT.
+Teams Search -> People / From текущего пользователя -> Date предыдущей недели -> Messages -> все страницы результатов -> уникальные переписки -> открыть каждую переписку -> lazy-loading истории вверх/вниз -> все сообщения участников за выбранный период -> TXT.
 
 Используемые стабильные DOM-маркеры Teams:
 - AUTOSUGGEST_INPUT;
@@ -74,17 +74,30 @@ Teams Search -> People / From текущего пользователя -> Date 
 - message-app-card-header;
 - search-pagination-previous-next.
 
-Сообщения дедуплицируются по message id, если он доступен, иначе по содержимому карточки.
+Teams Search используется только для discovery переписок. После обнаружения переписки расширение открывает Search result и читает штатный message pane Teams.
+
+Для обычных чатов используется:
+- message-pane-list-viewport;
+- chat-pane-item;
+- chat-pane-message;
+- message-author-name;
+- time[datetime];
+- data-message-content;
+- quoted-reply-card.
+
+История в чате виртуализирована, поэтому расширение прокручивает ее вверх до начала периода и затем вниз до конца периода, собирая lazy-loaded сообщения.
 
 Результат содержит:
 - период;
-- автора;
-- количество сообщений;
-- количество чатов/каналов;
-- список чатов/каналов;
-- для каждого результата время, чат/канал, текст сообщения и найденные URL.
+- автора, использованного для discovery;
+- количество Search hits;
+- список переписок;
+- полный диалог за период с сообщениями всех участников;
+- дату/время и автора каждого сообщения;
+- quoted reply preview, если он есть;
+- найденные URL.
 
-Важно: Teams Search иногда возвращает длинное сообщение как сокращенный preview с "...". Версия 2.2.0 сохраняет именно текст, который отдает Search result card, без открытия каждого сообщения в исходном чате.
+Если для конкретного результата Teams не открыл message pane, расширение не прерывает весь сбор и сохраняет для этой переписки Search fallback.
 
 Результаты
 ----------
@@ -93,7 +106,7 @@ Teams Search -> People / From текущего пользователя -> Date 
 Примеры:
 - <Meeting title> - YYYYMMDD.txt
 - <Meeting title> - YYYYMMDD - HHMM-HHMM.txt
-- Teams messages - YYYYMMDD-YYYYMMDD.txt
+- Teams chats - YYYYMMDD-YYYYMMDD.txt
 - batch-report.txt
 - batch-operation-log.txt
 - chat-operation-log.txt
@@ -116,7 +129,7 @@ Windows helper
 Helper работает on-demand: Chrome запускает его только на время файловой операции.
 Он не устанавливается как Windows Service и не висит постоянно в фоне.
 
-Для v2.2.4 NativeHost.cs не менялся, поэтому повторная установка helper после v2.1.x не требуется.
+Для v2.3.0 NativeHost.cs не менялся, поэтому повторная установка helper после v2.1.x не требуется.
 
 Диагностика
 -----------
@@ -140,8 +153,8 @@ Helper работает on-demand: Chrome запускает его только
 - calendar.js - DOM adapter и UI automation Teams Calendar / Meeting / Recap
 - batch-background.js - coordinator пакетного экспорта встреч
 - batch-panel.js - UI пакетного режима встреч
-- chat-search.js - DOM adapter Teams Search
-- chat-background.js - coordinator недельного экспорта сообщений
+- chat-search.js - DOM adapter Teams Search + сбор полного контекста из message pane
+- chat-background.js - coordinator discovery переписок и недельного экспорта полного контекста
 - chat-panel.js - UI режима "Чаты за неделю"
 - NativeHost.cs - сохранение файлов в Windows Documents
 - chrome.storage.local - состояния batch/chat и сохраненное имя пользователя
@@ -153,4 +166,4 @@ Teams Web не предоставляет стабильный публичны�
 
 Текущие batch workflow используют живой DOM вкладки Teams. Chrome может throttling/freeze неактивные вкладки. Полностью resumable orchestration после freeze/discard вкладки пока не реализован.
 
-Teams Search может обрезать длинные сообщения в карточке результата. Для подготовки отчета обычно достаточно поискового preview; получение полного текста каждого длинного сообщения потребует отдельного перехода к исходному сообщению.
+Teams Search используется только для discovery. Полный текст читается из открытой переписки. Для каналов или вариантов Teams UI, где Search result не открывает совместимый message pane, используется Search fallback.

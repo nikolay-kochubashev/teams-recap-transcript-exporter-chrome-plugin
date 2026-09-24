@@ -1,4 +1,4 @@
-Teams Recap Transcript Exporter v2.2.3
+Teams Recap Transcript Exporter v2.2.4
 
 Назначение
 ----------
@@ -116,7 +116,7 @@ Windows helper
 Helper работает on-demand: Chrome запускает его только на время файловой операции.
 Он не устанавливается как Windows Service и не висит постоянно в фоне.
 
-Для v2.2.3 NativeHost.cs не менялся, поэтому повторная установка helper после v2.1.x не требуется.
+Для v2.2.4 NativeHost.cs не менялся, поэтому повторная установка helper после v2.1.x не требуется.
 
 Диагностика
 -----------

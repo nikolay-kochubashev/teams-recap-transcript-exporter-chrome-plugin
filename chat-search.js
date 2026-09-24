@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = '2.5.0';
+  const VERSION = '2.5.1';
   const debugState = {
     stage: 'idle',
     lastQuery: '',
@@ -550,15 +550,7 @@
       throw new Error('Не удалось автоматически определить твое имя в Teams. Укажи имя или фамилию в поле расширения.');
     }
 
-    let author = query;
-    try {
-      author = await openKqlAuthorSearch(query);
-    } catch (kqlError) {
-      // Compatibility fallback for older Teams builds where KQL submission from
-      // the title search box is not available.
-      debugState.error = 'kql-fallback-to-people';
-      author = await openPeopleCentricSearch(query);
-    }
+    const author = await openKqlAuthorSearch(query);
 
     debugState.stage = 'date-filter';
     const dateRange = await applyDateRange(request.startDate, request.endDate);

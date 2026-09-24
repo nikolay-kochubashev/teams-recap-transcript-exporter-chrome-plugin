@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = '2.5.2';
+  const VERSION = '2.5.3';
   const debugState = {
     stage: 'idle',
     lastQuery: '',
@@ -432,11 +432,27 @@
       if (messagesTab && isRendered(messagesTab)) clickElement(messagesTab);
     }
 
+    // Teams renders the Search shell before message rows are fully hydrated.
+    // Waiting only for search-card/pagination is too early and can produce an
+    // empty first page even though the cards appear a moment later.
     await waitFor(() => {
+      const parsed = currentMessageRows();
+      if (parsed.length > 0) return parsed.length;
+
       const cards = document.querySelectorAll('[data-tid="search-card"]');
       const pagination = document.querySelector('[data-tid="search-pagination-previous-next"]');
-      return cards.length || pagination ? true : false;
+      const next = paginationNext();
+      const noResults = /No results|Нет результатов/i.test(
+        normalize(document.querySelector('[data-tid="search-content"]')?.innerText || '')
+      );
+
+      if (noResults) return 'no-results';
+      if (cards.length > 0 && pagination && next?.disabled) return 'settled-empty';
+      return null;
     }, 15000);
+
+    // Give React one extra frame to finish binding message content/cells.
+    await sleep(350);
   }
 
   function directCells(row, role) {
@@ -596,8 +612,26 @@
     };
   }
 
-  function collectPage() {
-    const items = currentMessageRows();
+  async function collectPage() {
+    // A page transition can expose the container before the rows themselves.
+    // Wait briefly for stable parsed rows instead of snapshotting an empty DOM.
+    let items = [];
+    let stable = 0;
+    let previousSignature = '';
+
+    for (let i = 0; i < 30; i++) {
+      items = currentMessageRows();
+      const signature = items.map(x => x.key).join('||');
+
+      if (items.length > 0 && signature === previousSignature) stable++;
+      else stable = 0;
+
+      previousSignature = signature;
+      if (items.length > 0 && stable >= 2) break;
+
+      await sleep(120);
+    }
+
     return {
       ok: true,
       items,
@@ -1048,12 +1082,10 @@
     }
 
     if (type === 'CHAT_COLLECT_PAGE') {
-      try {
-        sendResponse(collectPage());
-      } catch (error) {
+      collectPage().then(sendResponse).catch(error => {
         sendResponse({ ok: false, error: error.message || String(error), diagnostic: diagnostic() });
-      }
-      return;
+      });
+      return true;
     }
 
     if (type === 'CHAT_GO_NEXT') {

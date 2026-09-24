@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = '2.4.0';
+  const VERSION = '2.5.0';
   const debugState = {
     stage: 'idle',
     lastQuery: '',
@@ -203,6 +203,66 @@
     }
 
     return null;
+  }
+
+  function kqlAuthorQuery(query) {
+    const safe = normalize(query).replace(/"/g, '');
+    return 'from:"' + safe + '"';
+  }
+
+  async function submitSearchInput(input, value) {
+    input.focus();
+    setInputValue(input, '');
+    await sleep(120);
+    setInputValue(input, value);
+    await sleep(180);
+
+    input.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Enter',
+      code: 'Enter',
+      keyCode: 13,
+      which: 13,
+      bubbles: true,
+      cancelable: true
+    }));
+    input.dispatchEvent(new KeyboardEvent('keyup', {
+      key: 'Enter',
+      code: 'Enter',
+      keyCode: 13,
+      which: 13,
+      bubbles: true,
+      cancelable: true
+    }));
+  }
+
+  async function openKqlAuthorSearch(query) {
+    debugState.stage = 'kql-author-search';
+    debugState.error = '';
+
+    const input = await ensureSearchInput();
+    const kql = kqlAuthorQuery(query);
+    debugState.lastQuery = kql;
+    debugState.queryCandidates = [kql];
+
+    await submitSearchInput(input, kql);
+
+    const opened = await waitFor(() => {
+      const content = document.querySelector('[data-tid="search-content"]');
+      const dateFilter = document.querySelector('button[data-tid="search-date-filter"]');
+      const messagesTab = document.querySelector('[data-tid="messages-tab"]');
+      const cards = document.querySelectorAll('[data-tid="search-card"]');
+      return content && isRendered(content) && (dateFilter || messagesTab || cards.length)
+        ? content
+        : null;
+    }, 18000).catch(() => null);
+
+    if (!opened) {
+      debugState.error = 'kql-search-results-not-opened';
+      throw new Error('Teams не открыл результаты KQL-поиска по автору.');
+    }
+
+    debugState.stage = 'kql-author-ready';
+    return query;
   }
 
   async function openPeopleCentricSearch(query) {
@@ -490,7 +550,16 @@
       throw new Error('Не удалось автоматически определить твое имя в Teams. Укажи имя или фамилию в поле расширения.');
     }
 
-    const author = await openPeopleCentricSearch(query);
+    let author = query;
+    try {
+      author = await openKqlAuthorSearch(query);
+    } catch (kqlError) {
+      // Compatibility fallback for older Teams builds where KQL submission from
+      // the title search box is not available.
+      debugState.error = 'kql-fallback-to-people';
+      author = await openPeopleCentricSearch(query);
+    }
+
     debugState.stage = 'date-filter';
     const dateRange = await applyDateRange(request.startDate, request.endDate);
     debugState.stage = 'messages-results';

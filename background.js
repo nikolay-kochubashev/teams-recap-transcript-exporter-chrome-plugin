@@ -1,4 +1,4 @@
-importScripts('batch-background.js');
+importScripts('batch-background.js', 'chat-background.js');
 
 const PANEL_PATH = 'panel.html';
 const OWNER_STORAGE_KEY = 'sidePanelOwnerByWindow';

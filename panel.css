@@ -28,7 +28,7 @@ h1 {
 
 .mode-tabs {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 6px;
   margin-bottom: 14px;
   padding: 4px;
@@ -105,7 +105,8 @@ button:disabled {
 }
 
 #progressBar,
-#batchProgressBar {
+#batchProgressBar,
+#chatProgressBar {
   width: 0%;
   height: 100%;
   background: #5b5fc7;
@@ -259,4 +260,38 @@ textarea {
   color: #777;
   font-size: 11px;
   font-weight: 500;
+}
+
+
+.field-label {
+  display: block;
+  margin: 0 0 5px;
+  color: #555;
+  font-size: 12px;
+}
+
+.text-input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #c8c8c8;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font: inherit;
+}
+
+.text-input:focus {
+  outline: 2px solid rgba(91, 95, 199, .22);
+  border-color: #5b5fc7;
+}
+
+.period-label {
+  margin: 8px 0 12px;
+  color: #616161;
+  font-size: 12px;
+}
+
+@media (max-width: 390px) {
+  .mode-tabs {
+    grid-template-columns: 1fr;
+  }
 }

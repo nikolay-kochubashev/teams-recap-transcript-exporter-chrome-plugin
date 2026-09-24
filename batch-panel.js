@@ -8,8 +8,10 @@
   const versionBadge = document.getElementById('versionBadge');
   if (versionBadge) versionBadge.textContent = `v${chrome.runtime.getManifest().version}`;
   const batchSection = document.getElementById('batchSection');
+  const chatSection = document.getElementById('chatSection');
   const modeCurrentBtn = document.getElementById('modeCurrent');
   const modeBatchBtn = document.getElementById('modeBatch');
+  const modeChatBtn = document.getElementById('modeChat');
 
   const scanCalendarBtn = document.getElementById('scanCalendar');
   const calendarDiagnosticBtn = document.getElementById('calendarDiagnostic');
@@ -97,15 +99,24 @@
 
   function setMode(mode) {
     const batch = mode === 'batch';
-    currentSection.hidden = batch;
+    const chat = mode === 'chat';
+    const current = !batch && !chat;
+
+    currentSection.hidden = !current;
     batchSection.hidden = !batch;
-    modeCurrentBtn.classList.toggle('active', !batch);
+    if (chatSection) chatSection.hidden = !chat;
+
+    modeCurrentBtn.classList.toggle('active', current);
     modeBatchBtn.classList.toggle('active', batch);
+    if (modeChatBtn) modeChatBtn.classList.toggle('active', chat);
+
     if (batch) refreshBatchState();
+    if (chat) window.dispatchEvent(new CustomEvent('ttre:chat-mode'));
   }
 
   modeCurrentBtn.addEventListener('click', () => setMode('current'));
   modeBatchBtn.addEventListener('click', () => setMode('batch'));
+  if (modeChatBtn) modeChatBtn.addEventListener('click', () => setMode('chat'));
 
   function selectedMeetingIds() {
     return Array.from(meetingListEl.querySelectorAll('input[data-meeting-id]:checked')).map(x => x.dataset.meetingId);

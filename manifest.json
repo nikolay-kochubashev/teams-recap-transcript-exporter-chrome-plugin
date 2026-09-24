@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Teams Recap Transcript Exporter",
-  "version": "2.1.1",
-  "description": "Exports Microsoft Teams Recap transcripts individually or in batch from the Teams calendar.",
+  "version": "2.5.3",
+  "description": "Exports Microsoft Teams Recap transcripts and full weekly Teams conversation context for work reports.",
   "permissions": [
     "sidePanel",
     "downloads",
@@ -47,6 +47,18 @@
       ],
       "js": [
         "calendar.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://teams.microsoft.com/*",
+        "https://*.teams.microsoft.com/*",
+        "https://teams.cloud.microsoft/*",
+        "https://*.teams.cloud.microsoft/*"
+      ],
+      "js": [
+        "chat-search.js"
       ],
       "run_at": "document_idle"
     }

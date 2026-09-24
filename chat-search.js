@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = '2.5.1';
+  const VERSION = '2.5.2';
   const debugState = {
     stage: 'idle',
     lastQuery: '',
@@ -217,22 +217,48 @@
     setInputValue(input, value);
     await sleep(180);
 
-    input.dispatchEvent(new KeyboardEvent('keydown', {
-      key: 'Enter',
-      code: 'Enter',
-      keyCode: 13,
-      which: 13,
-      bubbles: true,
-      cancelable: true
-    }));
-    input.dispatchEvent(new KeyboardEvent('keyup', {
-      key: 'Enter',
-      code: 'Enter',
-      keyCode: 13,
-      which: 13,
-      bubbles: true,
-      cancelable: true
-    }));
+    // Teams Web can ignore synthetic Enter events from content scripts.
+    // Prefer the native form submission path first - React/Fluent handlers
+    // attached to the form still receive the submit event.
+    const form = input.closest('form');
+    if (form) {
+      try {
+        if (typeof form.requestSubmit === 'function') form.requestSubmit();
+        else form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      } catch (_) {}
+      await sleep(700);
+      if (document.querySelector('[data-tid="search-content"]')) return;
+    }
+
+    // Some Teams builds render the search action as a button next to the input.
+    const scope = input.closest('[role="search"]') || input.parentElement?.parentElement || document;
+    const submitButton = Array.from(scope.querySelectorAll?.('button') || []).find(btn => {
+      const aria = normalize(btn.getAttribute('aria-label'));
+      const title = normalize(btn.getAttribute('title'));
+      const tid = normalize(btn.getAttribute('data-tid'));
+      return /^(Search|Поиск)$/i.test(aria) ||
+        /^(Search|Поиск)$/i.test(title) ||
+        /search.*submit|submit.*search/i.test(tid);
+    });
+
+    if (submitButton && isRendered(submitButton)) {
+      clickElement(submitButton);
+      await sleep(700);
+      if (document.querySelector('[data-tid="search-content"]')) return;
+    }
+
+    // Last attempt for Teams versions that do accept keyboard submission.
+    input.focus();
+    for (const type of ['keydown', 'keypress', 'keyup']) {
+      input.dispatchEvent(new KeyboardEvent(type, {
+        key: 'Enter',
+        code: 'Enter',
+        keyCode: 13,
+        which: 13,
+        bubbles: true,
+        cancelable: true
+      }));
+    }
   }
 
   async function openKqlAuthorSearch(query) {

@@ -96,11 +96,12 @@
     const progress = Math.max(0, Math.min(100, Number(state?.progress || 0)));
     progressBar.style.width = progress + '%';
 
-    if (state?.pages || state?.messageCount) {
+    if (state?.pages || state?.searchHitCount || state?.messageCount) {
       metricsEl.textContent =
-        'Страниц: ' + (state.pages || 0) +
-        ' | сообщений: ' + (state.messageCount || 0) +
-        ' | чатов: ' + (state.conversationCount || 0);
+        'Страниц поиска: ' + (state.pages || 0) +
+        ' | моих сообщений: ' + (state.searchHitCount || 0) +
+        ' | переписок: ' + (state.conversationCount || 0) +
+        ' | контекст: ' + (state.messageCount || 0);
     } else {
       metricsEl.textContent = '';
     }

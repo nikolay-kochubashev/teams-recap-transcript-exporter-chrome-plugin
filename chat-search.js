@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = '2.2.3';
+  const VERSION = '2.2.4';
   const debugState = {
     stage: 'idle',
     lastQuery: '',
@@ -124,6 +124,10 @@
   }
 
   function personSearchActions() {
+    // Do NOT require getBoundingClientRect() here. In Teams autosuggest some
+    // icon buttons are visually rendered by Fluent UI while the button itself
+    // can temporarily report a zero-sized rect. The DOM node is still the
+    // correct actionable control.
     const selectors = [
       'button[data-tid="AUTOSUGGEST_ACTION_PEOPLECENTRICSEARCH"]',
       'button[aria-label^="All results from "]',
@@ -136,7 +140,7 @@
 
     for (const selector of selectors) {
       for (const el of document.querySelectorAll(selector)) {
-        if (seen.has(el) || !isRendered(el)) continue;
+        if (seen.has(el)) continue;
         seen.add(el);
         result.push(el);
       }
@@ -514,6 +518,8 @@
       lastQuery: debugState.lastQuery,
       queryCandidates: debugState.queryCandidates,
       peopleActions: debugState.peopleActions,
+      peopleActionsRaw: personSearchActions().length,
+      peopleActionsRendered: personSearchActions().filter(isRendered).length,
       allResultsWrappers: Array.from(document.querySelectorAll('[aria-label^="All results from "]'))
         .filter(isRendered)
         .slice(0, 10)

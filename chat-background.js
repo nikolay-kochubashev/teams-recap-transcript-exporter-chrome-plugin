@@ -106,6 +106,8 @@
       hitsByConversation.get(key).items.push(hit);
     }
 
+    // Search is discovery-only. It tells us which conversations are relevant,
+    // but Search rows themselves are never exported as conversation content.
     const allKeys = new Set([
       ...hitsByConversation.keys(),
       ...contexts.keys(),
@@ -126,7 +128,7 @@
 
     let savedMessages = 0;
     for (const group of groups) {
-      savedMessages += group.context?.messages?.length || group.fallback.length;
+      savedMessages += group.context?.messages?.length || 0;
     }
 
     const out = [
@@ -136,7 +138,7 @@
       'Search hits from author: ' + searchHits.length,
       'Conversations: ' + groups.length,
       'Full-context conversations: ' + contexts.size,
-      'Fallback conversations: ' + contextFailures.size,
+      'Conversations not opened: ' + contextFailures.size,
       'Messages saved: ' + savedMessages,
       '',
       'Conversations:',
@@ -172,20 +174,10 @@
           out.push('');
         }
       } else {
-        out.push('Source: Teams Search fallback - полный контекст чата открыть не удалось.');
+        out.push('Source: conversation context was not collected.');
         if (group.failure) out.push('Reason: ' + group.failure);
+        out.push('Search result content is intentionally not exported because it does not contain the full conversation context.');
         out.push('');
-
-        const fallback = group.fallback.slice().reverse();
-        for (const item of fallback) {
-          out.push(
-            (item.timestamp ? '[' + item.timestamp + '] ' : '') +
-            (item.sender || state.author || '')
-          );
-          if (item.message) out.push(item.message);
-          addLinks(out, item.links);
-          out.push('');
-        }
       }
     }
 
@@ -275,7 +267,7 @@
       state = await patchState({
         author: prepared.author || request.authorQuery || '',
         authorQuery: prepared.query || request.authorQuery || '',
-        message: 'Фильтры применены. Ищу переписки и собираю полный контекст...',
+        message: 'Фильтры применены. Search определяет релевантные чаты, затем читаю сообщения из самих чатов...',
         progress: 12
       });
       addLog('SEARCH_READY', prepared);
@@ -314,9 +306,9 @@
           progress: Math.min(92, 12 + page * 5),
           message:
             'Страница поиска ' + page +
-            ': моих сообщений ' + seenSearch.size +
-            ', переписок ' + knownConversations.size +
-            ', контекст собран для ' + contexts.size + '.'
+            ': найдено моих сообщений ' + seenSearch.size +
+            ', релевантных чатов ' + knownConversations.size +
+            ', чатов прочитано ' + contexts.size + '.'
         });
 
         addLog('PAGE_COLLECTED', {
@@ -407,7 +399,7 @@
         if (!name) continue;
         const key = conversationKey(name);
         if (!contexts.has(key) && !contextFailures.has(key)) {
-          contextFailures.set(key, 'Контекст не был открыт во время прохода Search.');
+          contextFailures.set(key, 'Чат не был открыт для чтения полного контекста.');
         }
       }
 

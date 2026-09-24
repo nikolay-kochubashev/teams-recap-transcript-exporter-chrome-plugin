@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = '2.2.4';
+  const VERSION = '2.3.0';
   const debugState = {
     stage: 'idle',
     lastQuery: '',
@@ -380,9 +380,25 @@
     if (!row?.querySelector('[data-tid="search-message-card"]')) return null;
 
     const rowHeader = directCells(row, 'rowheader')[0] || row.querySelector('[role="rowheader"]');
-    const conversationTitle = rowHeader?.querySelector('[title]')?.getAttribute('title') || '';
-    const headerLines = lines(rowHeader?.innerText || '');
-    const conversation = normalize(conversationTitle || headerLines.find(x => !/^Send feedback$/i.test(x)) || '');
+    const cardRoot = row.closest('[data-tid="search-card"]');
+    const appHeader = row.querySelector('[data-tid="message-app-card-header"]') ||
+      cardRoot?.querySelector('[data-tid="message-app-card-header"]');
+    const conversationTitle =
+      rowHeader?.querySelector('[title]')?.getAttribute('title') ||
+      appHeader?.querySelector('[title]')?.getAttribute('title') ||
+      '';
+    const headerLines = lines(
+      rowHeader?.innerText ||
+      appHeader?.innerText ||
+      rowHeader?.textContent ||
+      appHeader?.textContent ||
+      ''
+    );
+    const conversation = normalize(
+      conversationTitle ||
+      headerLines.find(x => !/^Send feedback$/i.test(x)) ||
+      ''
+    );
 
     const cells = directCells(row, 'gridcell');
     const senderLines = lines(cells[0]?.innerText || cells[0]?.textContent || '');
@@ -506,6 +522,380 @@
     };
   }
 
+
+  function localDateStamp(date) {
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) return '';
+    return String(date.getFullYear()) +
+      String(date.getMonth() + 1).padStart(2, '0') +
+      String(date.getDate()).padStart(2, '0');
+  }
+
+  function localDateTimeText(date) {
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) return '';
+    return String(date.getDate()).padStart(2, '0') + '.' +
+      String(date.getMonth() + 1).padStart(2, '0') + '.' +
+      String(date.getFullYear()) + ' ' +
+      String(date.getHours()).padStart(2, '0') + ':' +
+      String(date.getMinutes()).padStart(2, '0');
+  }
+
+  function cleanMultiline(value) {
+    const rows = String(value || '')
+      .replace(/\r/g, '')
+      .split('\n')
+      .map(x => x.replace(/[ \t\u00a0]+/g, ' ').trim());
+
+    const out = [];
+    let blank = false;
+    for (const row of rows) {
+      if (!row) {
+        if (!blank && out.length) out.push('');
+        blank = true;
+        continue;
+      }
+      blank = false;
+      out.push(row);
+    }
+    while (out.length && !out[out.length - 1]) out.pop();
+    return out.join('\n').trim();
+  }
+
+  function chatViewport() {
+    return document.querySelector(
+      '[data-tid="right-rail-message-pane-body"] [data-tid="message-pane-list-viewport"]'
+    ) || document.querySelector('[data-tid="message-pane-list-viewport"]');
+  }
+
+  function chatTitle() {
+    const title = document.querySelector('[data-tid="chat-title"]');
+    return normalize(title?.innerText || title?.textContent || '');
+  }
+
+  function searchRowForItem(item) {
+    if (item?.id) {
+      const content = document.getElementById('serp-message-card-content-' + item.id);
+      const row = content?.closest('[role="row"]');
+      if (row) return row;
+    }
+
+    const wantedConversation = normalize(item?.conversation).toLocaleLowerCase();
+    const wantedMessage = normalize(item?.message).slice(0, 80).toLocaleLowerCase();
+
+    for (const row of Array.from(document.querySelectorAll(
+      '[data-tid="search-content"] [data-tid="search-card"] [role="row"]'
+    ))) {
+      const parsed = parseMessageRow(row);
+      if (!parsed) continue;
+      const sameConversation = wantedConversation &&
+        normalize(parsed.conversation).toLocaleLowerCase() === wantedConversation;
+      const sameMessage = wantedMessage &&
+        normalize(parsed.message).toLocaleLowerCase().includes(wantedMessage);
+      if (sameConversation && (!wantedMessage || sameMessage)) return row;
+    }
+    return null;
+  }
+
+  function chatMessageText(contentNode) {
+    if (!contentNode) return { text: '', links: [], quote: null };
+
+    const quoteNode = contentNode.querySelector('[data-tid="quoted-reply-card"]');
+    let quote = null;
+    if (quoteNode) {
+      const quoteTimestamp = normalize(
+        quoteNode.querySelector('[data-tid="quoted-reply-timestamp"]')?.innerText ||
+        quoteNode.querySelector('[data-tid="quoted-reply-timestamp"]')?.textContent ||
+        ''
+      );
+      const quotePreview = cleanMultiline(
+        quoteNode.querySelector('[data-tid="quoted-reply-preview-content"]')?.innerText ||
+        quoteNode.querySelector('[data-tid="quoted-reply-preview-content"]')?.textContent ||
+        ''
+      );
+      const quoteLines = lines(quoteNode.innerText || quoteNode.textContent || '');
+      const quoteAuthor = quoteLines.find(x => x !== quoteTimestamp && x !== quotePreview) || '';
+      quote = {
+        author: normalize(quoteAuthor),
+        timestamp: quoteTimestamp,
+        preview: quotePreview
+      };
+    }
+
+    const clone = contentNode.cloneNode(true);
+    clone.querySelectorAll('[data-tid="quoted-reply-card"]').forEach(x => x.remove());
+    clone.querySelectorAll('button,svg,[role="button"]').forEach(x => x.remove());
+
+    const links = [];
+    for (const a of Array.from(clone.querySelectorAll('a[href]'))) {
+      const href = a.href || a.getAttribute('href') || '';
+      const label = normalize(a.innerText || a.textContent);
+      if (/^https?:/i.test(href)) {
+        links.push(href);
+        a.textContent = label && label !== href ? label + ' (' + href + ')' : href;
+      }
+    }
+
+    return {
+      text: cleanMultiline(clone.innerText || clone.textContent || ''),
+      links: Array.from(new Set(links)),
+      quote
+    };
+  }
+
+  function parseChatItem(item) {
+    const body = item?.querySelector('[data-tid="chat-pane-message"]');
+    if (!body) return null;
+
+    const mid = normalize(body.getAttribute('data-mid'));
+    const time = item.querySelector('time[datetime]');
+    let epoch = Number(mid);
+    if (!Number.isFinite(epoch) || epoch < 1000000000000) {
+      epoch = Date.parse(time?.getAttribute('datetime') || '');
+    }
+    if (!Number.isFinite(epoch)) return null;
+
+    const date = new Date(epoch);
+    const content = item.querySelector('[data-message-content]') || body;
+    const extracted = chatMessageText(content);
+    const author = normalize(
+      item.querySelector('[data-tid="message-author-name"]')?.innerText ||
+      item.querySelector('[data-tid="message-author-name"]')?.textContent ||
+      ''
+    );
+
+    const key = mid || [
+      epoch,
+      author,
+      extracted.text,
+      extracted.quote?.preview || ''
+    ].join('|');
+
+    return {
+      id: mid,
+      key,
+      epoch,
+      stamp: localDateStamp(date),
+      dateTime: date.toISOString(),
+      timestamp: localDateTimeText(date),
+      author,
+      message: extracted.text,
+      quote: extracted.quote,
+      links: extracted.links
+    };
+  }
+
+  function visibleChatMessages(viewport) {
+    const root = viewport || chatViewport();
+    if (!root) return [];
+
+    const out = [];
+    const seen = new Set();
+    for (const item of Array.from(root.querySelectorAll('[data-tid="chat-pane-item"]'))) {
+      const parsed = parseChatItem(item);
+      if (!parsed || seen.has(parsed.key)) continue;
+      seen.add(parsed.key);
+      out.push(parsed);
+    }
+    return out;
+  }
+
+  function viewportSignature(viewport) {
+    const items = visibleChatMessages(viewport);
+    return items.slice(0, 2).concat(items.slice(-2))
+      .map(x => x.key)
+      .join('||') + '::' + Math.round(viewport?.scrollTop || 0);
+  }
+
+  async function nudgeChatViewport(viewport, direction) {
+    const beforeSignature = viewportSignature(viewport);
+    const beforeTop = Number(viewport.scrollTop || 0);
+    const step = Math.max(260, Math.floor((viewport.clientHeight || 600) * 0.68));
+    const target = Math.max(0, beforeTop + (direction < 0 ? -step : step));
+
+    viewport.scrollTop = target;
+    viewport.dispatchEvent(new Event('scroll', { bubbles: true }));
+
+    for (let i = 0; i < 12; i++) {
+      await sleep(i === 0 ? 220 : 120);
+      const afterSignature = viewportSignature(viewport);
+      const afterTop = Number(viewport.scrollTop || 0);
+      if (afterSignature !== beforeSignature || Math.abs(afterTop - beforeTop) > 1) {
+        return { moved: true, beforeTop, afterTop };
+      }
+    }
+
+    return { moved: false, beforeTop, afterTop: Number(viewport.scrollTop || 0) };
+  }
+
+  function titleLooksLike(actual, expected) {
+    const a = normalize(actual).toLocaleLowerCase();
+    const e = normalize(expected).toLocaleLowerCase();
+    if (!a || !e) return false;
+    return a === e || a.includes(e) || e.includes(a);
+  }
+
+  function paneContainsMessage(viewport, message) {
+    const needle = normalize(message).slice(0, 70).toLocaleLowerCase();
+    if (!needle) return false;
+    return visibleChatMessages(viewport).some(x =>
+      normalize(x.message).toLocaleLowerCase().includes(needle)
+    );
+  }
+
+  async function openConversationFromSearch(item) {
+    const row = searchRowForItem(item);
+    if (!row) throw new Error('Search result row для переписки не найден.');
+
+    const beforeTitle = chatTitle();
+    const beforeViewport = chatViewport();
+    const beforeSignature = beforeViewport ? viewportSignature(beforeViewport) : '';
+
+    clickElement(row);
+
+    let viewport = await waitFor(() => {
+      const current = chatViewport();
+      if (!current) return null;
+
+      const currentTitle = chatTitle();
+      if (titleLooksLike(currentTitle, item?.conversation)) return current;
+      if (paneContainsMessage(current, item?.message)) return current;
+
+      const currentSignature = viewportSignature(current);
+      if (currentTitle && currentTitle !== beforeTitle && currentSignature !== beforeSignature) {
+        return current;
+      }
+      return null;
+    }, 10000).catch(() => null);
+
+    if (!viewport) {
+      try {
+        row.focus();
+        row.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'Enter',
+          code: 'Enter',
+          bubbles: true,
+          cancelable: true
+        }));
+      } catch (_) {}
+
+      viewport = await waitFor(() => {
+        const current = chatViewport();
+        if (!current) return null;
+        if (titleLooksLike(chatTitle(), item?.conversation)) return current;
+        if (paneContainsMessage(current, item?.message)) return current;
+        return null;
+      }, 8000).catch(() => null);
+    }
+
+    if (!viewport) {
+      throw new Error('Teams не открыл контекст переписки для выбранного Search result.');
+    }
+
+    await sleep(350);
+    return viewport;
+  }
+
+  async function collectConversationContext(request) {
+    const item = request?.item || {};
+    const startDate = String(request?.startDate || '');
+    const endDate = String(request?.endDate || '');
+
+    if (!/^\d{8}$/.test(startDate) || !/^\d{8}$/.test(endDate)) {
+      throw new Error('Некорректный период для чтения переписки.');
+    }
+
+    debugState.stage = 'conversation-open';
+    const viewport = await openConversationFromSearch(item);
+    const actualTitle = chatTitle() || normalize(item.conversation) || 'Conversation';
+
+    debugState.stage = 'conversation-scroll';
+    const collected = new Map();
+
+    const addVisible = () => {
+      for (const message of visibleChatMessages(viewport)) {
+        if (!message.key) continue;
+        collected.set(message.key, message);
+      }
+    };
+
+    const minStamp = () => {
+      const values = Array.from(collected.values()).map(x => x.stamp).filter(Boolean).sort();
+      return values[0] || '';
+    };
+
+    const maxStamp = () => {
+      const values = Array.from(collected.values()).map(x => x.stamp).filter(Boolean).sort();
+      return values.length ? values[values.length - 1] : '';
+    };
+
+    addVisible();
+
+    let upStable = 0;
+    let reachedStart = false;
+    for (let i = 0; i < 180; i++) {
+      if (minStamp() && minStamp() < startDate) {
+        reachedStart = true;
+        break;
+      }
+
+      const moved = await nudgeChatViewport(viewport, -1);
+      addVisible();
+
+      if (!moved.moved || Number(viewport.scrollTop || 0) <= 1) upStable++;
+      else upStable = 0;
+
+      if (upStable >= 3) {
+        reachedStart = true;
+        break;
+      }
+    }
+
+    let downStable = 0;
+    let reachedEnd = false;
+    for (let i = 0; i < 260; i++) {
+      if (maxStamp() && maxStamp() > endDate) {
+        reachedEnd = true;
+        break;
+      }
+
+      const moved = await nudgeChatViewport(viewport, 1);
+      addVisible();
+
+      const atBottom =
+        Math.abs(
+          Number(viewport.scrollHeight || 0) -
+          Number(viewport.clientHeight || 0) -
+          Number(viewport.scrollTop || 0)
+        ) <= 3;
+
+      if (!moved.moved || atBottom) downStable++;
+      else downStable = 0;
+
+      if (downStable >= 3) {
+        reachedEnd = true;
+        break;
+      }
+    }
+
+    addVisible();
+
+    const messages = Array.from(collected.values())
+      .filter(x => x.stamp >= startDate && x.stamp <= endDate)
+      .sort((a, b) => a.epoch - b.epoch || String(a.key).localeCompare(String(b.key)));
+
+    debugState.stage = 'ready';
+
+    return {
+      ok: true,
+      conversation: actualTitle,
+      requestedConversation: normalize(item.conversation),
+      messages,
+      count: messages.length,
+      loaded: collected.size,
+      reachedStart,
+      reachedEnd
+    };
+  }
+
   function diagnostic() {
     const dateButton = Array.from(document.querySelectorAll('button[data-tid="search-date-filter"]')).find(isRendered);
     const peopleButton = Array.from(document.querySelectorAll('button[data-tid="search-people-filter"]')).find(isRendered);
@@ -542,7 +932,14 @@
       pagination: !!document.querySelector('[data-tid="search-pagination-previous-next"]'),
       nextText: normalize(next?.innerText || ''),
       nextDisabled: next ? !!next.disabled : null,
-      sample: items.slice(0, 10)
+      sample: items.slice(0, 10),
+      chatContext: {
+        title: chatTitle(),
+        viewport: !!chatViewport(),
+        visibleMessages: visibleChatMessages(chatViewport()).length,
+        firstVisible: visibleChatMessages(chatViewport())[0] || null,
+        lastVisible: visibleChatMessages(chatViewport()).slice(-1)[0] || null
+      }
     };
 
     return JSON.stringify(info, null, 2);
@@ -574,6 +971,13 @@
 
     if (type === 'CHAT_GO_NEXT') {
       goNextPage().then(sendResponse).catch(error => {
+        sendResponse({ ok: false, error: error.message || String(error), diagnostic: diagnostic() });
+      });
+      return true;
+    }
+
+    if (type === 'CHAT_COLLECT_CONVERSATION_CONTEXT') {
+      collectConversationContext(message).then(sendResponse).catch(error => {
         sendResponse({ ok: false, error: error.message || String(error), diagnostic: diagnostic() });
       });
       return true;

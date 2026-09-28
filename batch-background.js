@@ -144,11 +144,13 @@ async function probeTranscriptFrames(tabId, timeoutMs = 9000) {
     // A real transcript scroller has semantic evidence such as transcript entry
     // votes, timestamp rows or the Teams transcript warning/accessibility text.
     const selected = results.find(x =>
-      x.best && x.best.strong && (
-        (x.best.votes || 0) > 0 ||
-        (x.best.times || 0) > 0 ||
-        (x.best.reasons || []).includes('ai-warning') ||
-        (x.best.reasons || []).includes('transcript-a11y')
+      x.best && (
+        x.best.strong ||
+        ((x.best.votes || 0) > 0 && (x.best.times || 0) > 0) ||
+        (
+          (x.best.score || 0) >= 90 &&
+          (x.best.reasons || []).includes('near-transcript-heading')
+        )
       )
     ) || null;
 

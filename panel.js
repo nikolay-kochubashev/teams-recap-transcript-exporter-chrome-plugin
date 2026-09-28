@@ -1,5 +1,6 @@
 let currentState = null;
 let currentTabId = null;
+let currentFrameId = null;
 let pollTimer = null;
 let nativeAvailable = false;
 let lastSaved = null;
@@ -57,14 +58,58 @@ async function getActiveTab() {
   return tabs[0];
 }
 
+async function findTranscriptFrame(tabId) {
+  let frames = [];
+  try {
+    frames = await chrome.webNavigation.getAllFrames({ tabId }) || [];
+  } catch (_) {
+    frames = [{ frameId: 0 }];
+  }
+
+  const probes = [];
+  for (const frame of frames) {
+    try {
+      const probe = await chrome.tabs.sendMessage(tabId, { type: 'PROBE_TRANSCRIPT' }, { frameId: frame.frameId });
+      if (probe?.ok) probes.push({ frameId: frame.frameId, ...probe });
+    } catch (_) {}
+  }
+
+  probes.sort((a, b) => {
+    const as = a.best ? (a.best.strong ? 10000 : 0) + (a.best.score || 0) : 0;
+    const bs = b.best ? (b.best.strong ? 10000 : 0) + (b.best.score || 0) : 0;
+    return bs - as;
+  });
+
+  const selected = probes.find(x =>
+    x.best && (
+      x.best.strong ||
+      (x.best.score || 0) >= 45 ||
+      ((x.best.votes || 0) > 0 && (x.best.times || 0) > 0)
+    )
+  );
+
+  return selected?.frameId ?? null;
+}
+
 async function sendToActiveTab(message) {
   const tab = await getActiveTab();
+  if (currentTabId !== tab.id) currentFrameId = null;
   currentTabId = tab.id;
+
   if (!/^https:\/\//i.test(tab.url || '')) {
     throw new Error('Открой Recap в обычной HTTPS-вкладке Chrome.');
   }
+
   try {
-    return await chrome.tabs.sendMessage(tab.id, message);
+    if (message?.type === 'START_EXTRACT' || message?.type === 'GET_DEBUG') {
+      currentFrameId = await findTranscriptFrame(tab.id);
+    }
+
+    if (currentFrameId !== null) {
+      return await chrome.tabs.sendMessage(tab.id, message, { frameId: currentFrameId });
+    }
+
+    return await chrome.tabs.sendMessage(tab.id, message, { frameId: 0 });
   } catch (e) {
     throw new Error('Эта страница не поддерживается расширением. Открой Teams/SharePoint Recap и обнови вкладку после установки новой версии.');
   }
@@ -271,6 +316,7 @@ showFolderBtn.addEventListener('click', async () => {
 });
 
 chrome.tabs.onActivated.addListener(() => {
+  currentFrameId = null;
   lastSaved = null;
   showFolderBtn.disabled = true;
   refreshState();
@@ -278,6 +324,7 @@ chrome.tabs.onActivated.addListener(() => {
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (tabId === currentTabId && changeInfo.status === 'complete') {
+    currentFrameId = null;
     lastSaved = null;
     showFolderBtn.disabled = true;
     setTimeout(refreshState, 400);

@@ -2,7 +2,7 @@
   if (window.__teamsRecapTranscriptExporterLoaded) return;
   window.__teamsRecapTranscriptExporterLoaded = true;
 
-  const VERSION = '1.7.0';
+  const VERSION = '1.8.0';
   const state = {
     status: 'idle',
     message: 'Готово к работе.',
@@ -44,23 +44,32 @@
   const publicState = () => ({ ...state });
   const update = patch => Object.assign(state, patch);
 
-  function isRendered(el) {
+  function isVisibleElement(el) {
     if (!el || !(el instanceof Element) || !el.isConnected) return false;
     const style = getComputedStyle(el);
     if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  }
+
+  function isRendered(el) {
+    if (!isVisibleElement(el)) return false;
     const r = el.getBoundingClientRect();
     return r.width > 20 && r.height > 20;
   }
 
   function isInViewport(el) {
-    if (!isRendered(el)) return false;
+    if (!isVisibleElement(el)) return false;
     const r = el.getBoundingClientRect();
     return r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth;
   }
 
   function isScrollable(el) {
     if (!isRendered(el)) return false;
-    return el.scrollHeight > el.clientHeight + 40;
+    const style = getComputedStyle(el);
+    const overflowAllowsScroll = /^(?:auto|scroll|overlay)$/i.test(style.overflowY || '');
+    return el.scrollHeight > el.clientHeight + 8 ||
+      (overflowAllowsScroll && el.clientHeight > 80 && el.scrollHeight >= el.clientHeight);
   }
 
   const clockTimeRegex = /(?:^|\s)(?:\d{1,2}:)?\d{1,2}:\d{2}(?:\s|$)/g;
@@ -103,7 +112,7 @@
     // strongest layout-independent signal. It works both for the right-side panel
     // and for the responsive layout where Transcript moves below the video.
     for (const el of document.querySelectorAll('body *')) {
-      if (!isRendered(el)) continue;
+      if (!isVisibleElement(el)) continue;
       const text = normalizeLine(el.innerText || el.textContent || '');
       if (!text || text.length > 240) continue;
 
@@ -147,7 +156,11 @@
       const hasAiWarning = /AI-generated content may be incorrect/i.test(sample);
       const hasTranscriptA11y = /Transcript\. Use arrow keys to navigate between transcript entries/i.test(sample);
       const hasTranscriptText = transcriptWord.test(sample.slice(0, 3000));
-      const hasStrongTranscriptSignal = hasAiWarning || hasTranscriptA11y || (hasTranscriptText && times >= 1);
+      const hasStrongTranscriptSignal =
+        hasAiWarning ||
+        hasTranscriptA11y ||
+        (hasTranscriptText && times >= 1) ||
+        ((vote?.count || 0) > 0 && times >= 1);
 
       if (vote?.count) {
         score += vote.count * 65;
@@ -256,20 +269,41 @@
     return null;
   }
 
+  function validSpeaker(value) {
+    const speaker = normalizeLine(value);
+    if (speaker.length < 2 || speaker.length > 180) return false;
+    if (!/[A-Za-zА-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһІі]/u.test(speaker)) return false;
+    if (/^(transcript|download|search|speakers?|notes|ai summary)$/i.test(speaker)) return false;
+    return true;
+  }
+
   function parseCombinedHeader(line) {
     const normalized = normalizeLine(line);
     if (!normalized) return null;
-    const match = normalized.match(/^(.+?)\s+((?:(?:\d+)\s+hours?\s*)?(?:(?:\d+)\s+minutes?\s*)?(?:(?:\d+)\s+seconds?))$/i);
-    if (!match) return null;
 
-    const speaker = normalizeLine(match[1]);
-    const durationText = normalizeLine(match[2]);
-    const seconds = parseDurationText(durationText);
-    if (seconds === null) return null;
-    if (speaker.length < 2 || speaker.length > 180) return null;
-    if (!/[A-Za-zА-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһІі]/u.test(speaker)) return null;
-    if (/^(transcript|download|search|speakers?)$/i.test(speaker)) return null;
-    return { speaker, seconds, durationText };
+    const durationMatch = normalized.match(/^(.+?)\s+((?:(?:\d+)\s+hours?\s*)?(?:(?:\d+)\s+minutes?\s*)?(?:(?:\d+)\s+seconds?))$/i);
+    if (durationMatch) {
+      const speaker = normalizeLine(durationMatch[1]);
+      const durationText = normalizeLine(durationMatch[2]);
+      const seconds = parseDurationText(durationText);
+      if (seconds !== null && validSpeaker(speaker)) {
+        return { speaker, seconds, durationText };
+      }
+    }
+
+    // New Teams Recap renders timestamps as clock values, e.g.
+    // "Speaker Name 58:41", instead of "58 minutes 41 seconds".
+    const clockMatch = normalized.match(/^(.+?)\s+((?:\d{1,2}:)?\d{1,2}:\d{2})$/);
+    if (clockMatch) {
+      const speaker = normalizeLine(clockMatch[1]);
+      const clockText = normalizeLine(clockMatch[2]);
+      const seconds = parseClock(clockText);
+      if (seconds !== null && validSpeaker(speaker)) {
+        return { speaker, seconds, durationText: clockText };
+      }
+    }
+
+    return null;
   }
 
   function isNoiseLine(line) {
@@ -291,8 +325,38 @@
     const headers = [];
     for (let i = 0; i < lines.length; i++) {
       const parsed = parseCombinedHeader(lines[i]);
-      if (parsed) headers.push({ index: i, ...parsed });
+      if (parsed) {
+        headers.push({ index: i, bodyStart: i + 1, ...parsed });
+        continue;
+      }
+
+      // Some current Teams builds split speaker and timestamp into two DOM
+      // lines: "Speaker Name" followed by "58:41".
+      if (clockOnlyRegex.test(lines[i]) && i > 0 && validSpeaker(lines[i - 1])) {
+        const seconds = parseClock(lines[i]);
+        if (seconds !== null) {
+          headers.push({
+            index: i - 1,
+            bodyStart: i + 1,
+            speaker: lines[i - 1],
+            seconds,
+            durationText: lines[i]
+          });
+        }
+      }
     }
+
+    // De-duplicate a header if both combined/split heuristics point to it.
+    const uniqueHeaders = [];
+    const headerKeys = new Set();
+    for (const header of headers) {
+      const key = `${header.index}|${header.seconds}|${header.speaker}`;
+      if (headerKeys.has(key)) continue;
+      headerKeys.add(key);
+      uniqueHeaders.push(header);
+    }
+    headers.length = 0;
+    headers.push(...uniqueHeaders.sort((a, b) => a.index - b.index));
 
     const entries = [];
     if (headers.length < 1) return { entries, headerCount: headers.length, rawLines: lines };
@@ -301,7 +365,7 @@
       const current = headers[h];
       const next = headers[h + 1] || null;
       const end = next ? next.index : lines.length;
-      let segment = lines.slice(current.index + 1, end);
+      let segment = lines.slice(current.bodyStart ?? (current.index + 1), end);
 
       if (next) {
         while (segment.length) {

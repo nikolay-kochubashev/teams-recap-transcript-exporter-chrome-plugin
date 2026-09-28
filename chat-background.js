@@ -40,6 +40,20 @@
     return state;
   }
 
+  async function recoverInterruptedState() {
+    try {
+      const state = await getState();
+      if (state.status === 'running' || /Останавливаю после текущего шага/i.test(state.message || '')) {
+        await patchState({
+          status: 'stopped',
+          message: 'Предыдущий сбор был прерван перезапуском браузера.',
+          error: '',
+          finishedAt: new Date().toISOString()
+        });
+      }
+    } catch (_) {}
+  }
+
   function nativeMessage(message) {
     return new Promise((resolve, reject) => {
       chrome.runtime.sendNativeMessage(CHAT_NATIVE_HOST, message, response => {
@@ -505,6 +519,17 @@
     }
 
     if (type === 'CHAT_STOP') {
+      if (!runningPromise) {
+        stopRequested = false;
+        patchState({
+          status: 'stopped',
+          message: 'Сбор переписки остановлен.',
+          error: '',
+          finishedAt: new Date().toISOString()
+        }).then(state => sendResponse({ ok: true, state }));
+        return true;
+      }
+
       stopRequested = true;
       patchState({ message: 'Останавливаю после текущего шага...' })
         .then(state => sendResponse({ ok: true, state }));
@@ -526,4 +551,6 @@
       return true;
     }
   });
+
+  recoverInterruptedState();
 })();

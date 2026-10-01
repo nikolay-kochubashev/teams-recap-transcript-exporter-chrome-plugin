@@ -284,7 +284,16 @@
 
     if (type === 'CURRENT_CHAT_OPEN_FOLDER') {
       getState().then(async state => {
-        if (!state.folderPath) throw new Error('Папка результата еще не создана.');
+        // Use the exact saved file as the source of truth. folderPath can be
+        // stale for a short time between runs, while filePath is written only
+        // after the current export has successfully completed.
+        if (state.filePath) {
+          const response = await nativeMessage({ action: 'showInFolder', path: state.filePath });
+          sendResponse(response);
+          return;
+        }
+
+        if (!state.folderPath) throw new Error('Результат еще не сохранен.');
         const response = await nativeMessage({ action: 'openDirectory', path: state.folderPath });
         sendResponse(response);
       }).catch(error => sendResponse({ ok: false, error: error.message || String(error) }));

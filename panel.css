@@ -28,7 +28,7 @@ h1 {
 
 .mode-tabs {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
   margin-bottom: 14px;
   padding: 4px;
@@ -106,7 +106,8 @@ button:disabled {
 
 #progressBar,
 #batchProgressBar,
-#chatProgressBar {
+#chatProgressBar,
+#currentChatProgressBar {
   width: 0%;
   height: 100%;
   background: #5b5fc7;
@@ -294,4 +295,15 @@ textarea {
   .mode-tabs {
     grid-template-columns: 1fr;
   }
+}
+
+
+.range-field {
+  margin-top: 10px;
+}
+
+select.text-input,
+input[type="date"].text-input,
+input[type="number"].text-input {
+  background: #fff;
 }

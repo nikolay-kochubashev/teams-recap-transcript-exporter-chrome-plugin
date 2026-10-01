@@ -14,6 +14,7 @@
       <button id="modeCurrent" class="mode-tab active">Текущая встреча</button>
       <button id="modeBatch" class="mode-tab">Пакет из календаря</button>
       <button id="modeChat" class="mode-tab">Чаты за неделю</button>
+      <button id="modeCurrentChat" class="mode-tab">Текущий чат</button>
     </div>
 
     <section id="currentSection">
@@ -83,6 +84,46 @@
       <div id="batchLog" class="batch-log"></div>
     </section>
 
+    <section id="currentChatSection" hidden>
+      <p class="hint">Читает открытый сейчас чат Teams целиком или за выбранный период. Teams Search не используется.</p>
+
+      <label class="field-label" for="currentChatRangeMode">Период</label>
+      <select id="currentChatRangeMode" class="text-input">
+        <option value="all">Весь доступный чат</option>
+        <option value="since">С указанной даты</option>
+        <option value="months">Последние N месяцев</option>
+      </select>
+
+      <div id="currentChatSinceWrap" class="range-field" hidden>
+        <label class="field-label" for="currentChatSince">Читать с даты</label>
+        <input id="currentChatSince" class="text-input" type="date" />
+      </div>
+
+      <div id="currentChatMonthsWrap" class="range-field" hidden>
+        <label class="field-label" for="currentChatMonths">Количество месяцев</label>
+        <input id="currentChatMonths" class="text-input" type="number" min="1" max="60" step="1" value="3" />
+      </div>
+
+      <div class="actions primary-actions">
+        <button id="startCurrentChatExport" class="primary">Прочитать чат</button>
+        <button id="stopCurrentChatExport" disabled>Остановить</button>
+      </div>
+
+      <div class="progress-wrap">
+        <div class="progress"><div id="currentChatProgressBar"></div></div>
+        <div id="currentChatMetrics" class="progress-text"></div>
+      </div>
+
+      <div id="currentChatStatus" class="status">Открой нужный чат Teams.</div>
+      <div class="save-mode">Результат сохраняется в Windows Documents\Teams Transcripts\&lt;timestamp&gt;.</div>
+
+      <div class="actions">
+        <button id="openCurrentChatFolder" disabled>Открыть папку</button>
+        <button id="currentChatDiagnostic">Скопировать диагностику</button>
+        <button id="resetCurrentChatExport">Сбросить</button>
+      </div>
+    </section>
+
     <section id="chatSection" hidden>
       <p class="hint">Сначала через Teams Search находит переписки, где ты писал за предыдущую календарную неделю. Затем открывает каждую переписку и собирает все сообщения участников за этот период, чтобы сохранить контекст.</p>
 
@@ -113,5 +154,6 @@
   <script src="panel.js"></script>
   <script src="batch-panel.js"></script>
   <script src="chat-panel.js"></script>
+  <script src="current-chat-panel.js"></script>
 </body>
 </html>

@@ -9,9 +9,11 @@
   if (versionBadge) versionBadge.textContent = `v${chrome.runtime.getManifest().version}`;
   const batchSection = document.getElementById('batchSection');
   const chatSection = document.getElementById('chatSection');
+  const currentChatSection = document.getElementById('currentChatSection');
   const modeCurrentBtn = document.getElementById('modeCurrent');
   const modeBatchBtn = document.getElementById('modeBatch');
   const modeChatBtn = document.getElementById('modeChat');
+  const modeCurrentChatBtn = document.getElementById('modeCurrentChat');
 
   const scanCalendarBtn = document.getElementById('scanCalendar');
   const calendarDiagnosticBtn = document.getElementById('calendarDiagnostic');
@@ -100,23 +102,28 @@
   function setMode(mode) {
     const batch = mode === 'batch';
     const chat = mode === 'chat';
-    const current = !batch && !chat;
+    const currentChat = mode === 'current-chat';
+    const current = !batch && !chat && !currentChat;
 
     currentSection.hidden = !current;
     batchSection.hidden = !batch;
     if (chatSection) chatSection.hidden = !chat;
+    if (currentChatSection) currentChatSection.hidden = !currentChat;
 
     modeCurrentBtn.classList.toggle('active', current);
     modeBatchBtn.classList.toggle('active', batch);
     if (modeChatBtn) modeChatBtn.classList.toggle('active', chat);
+    if (modeCurrentChatBtn) modeCurrentChatBtn.classList.toggle('active', currentChat);
 
     if (batch) refreshBatchState();
     if (chat) window.dispatchEvent(new CustomEvent('ttre:chat-mode'));
+    if (currentChat) window.dispatchEvent(new CustomEvent('ttre:current-chat-mode'));
   }
 
   modeCurrentBtn.addEventListener('click', () => setMode('current'));
   modeBatchBtn.addEventListener('click', () => setMode('batch'));
   if (modeChatBtn) modeChatBtn.addEventListener('click', () => setMode('chat'));
+  if (modeCurrentChatBtn) modeCurrentChatBtn.addEventListener('click', () => setMode('current-chat'));
 
   function selectedMeetingIds() {
     return Array.from(meetingListEl.querySelectorAll('input[data-meeting-id]:checked')).map(x => x.dataset.meetingId);

@@ -1376,6 +1376,9 @@
   function normalizedComparable(value) {
     return normalize(value)
       .toLowerCase()
+      // Teams/Outlook often adds transport prefixes to Calendar titles while
+      // the meeting/Recap surface shows the same title without them.
+      .replace(/^(?:(?:fw|fwd|re)\s*:\s*)+/i, '')
       .replace(/[“”"'.,;:()[\]{}]/g, '')
       .replace(/\s+/g, ' ')
       .trim();

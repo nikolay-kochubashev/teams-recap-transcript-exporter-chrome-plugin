@@ -1,4 +1,4 @@
-Teams Recap Transcript Exporter v2.5.3
+Teams Recap Transcript Exporter v2.6.0
 
 Назначение
 ----------
@@ -30,6 +30,18 @@ Chrome-расширение для сбора рабочих материало�
    - Расширение автоматически выбирает предыдущую календарную неделю: понедельник -> воскресенье.
    - Search используется только для обнаружения релевантных чатов.
    - После этого расширение открывает каждый найденный чат и собирает сообщения всех участников за выбранный период.
+   - Результат сохраняется в отдельную папку Windows Documents\Teams Transcripts\<timestamp>.
+
+4. Текущий чат
+   - Открыть нужный чат Teams.
+   - Открыть Side Panel -> "Текущий чат".
+   - Выбрать период:
+     - весь доступный чат;
+     - с указанной даты;
+     - последние N месяцев.
+   - Нажать "Прочитать чат".
+   - Расширение прокручивает виртуализированную историю, собирает сообщения всех участников, quoted replies и URL.
+   - Teams Search в этом режиме не используется.
    - Результат сохраняется в отдельную папку Windows Documents\Teams Transcripts\<timestamp>.
 
 Side Panel
@@ -109,6 +121,22 @@ Teams Search используется только для discovery:
 - найденные URL;
 - информацию о чатах, которые не удалось открыть.
 
+Workflow текущего чата
+----------------------
+Режим "Текущий чат" работает непосредственно с уже открытым message pane Teams.
+
+Маршрут:
+открытый чат -> message-pane-list-viewport -> lazy-loading вверх до начала выбранного периода -> lazy-loading вниз до конца/последнего сообщения -> TXT.
+
+Поддерживаемые периоды:
+- весь доступный чат;
+- с выбранной даты по текущую дату;
+- последние N месяцев.
+
+Для длинных чатов расширение последовательно прокручивает виртуализированный список сообщений и дедуплицирует сообщения по message id/времени/автору/тексту.
+
+Кнопка "Остановить" прерывает текущий проход. Состояние незавершенного запуска после перезапуска Chrome автоматически переводится в "прерван".
+
 Результаты
 ----------
 Транскрипции и недельная переписка сохраняются через Windows helper в Documents\Teams Transcripts.
@@ -117,6 +145,8 @@ Teams Search используется только для discovery:
 - <Meeting title> - YYYYMMDD.txt
 - <Meeting title> - YYYYMMDD - HHMM-HHMM.txt
 - Teams chats - YYYYMMDD-YYYYMMDD.txt
+- Teams chat - <Chat title> - all.txt
+- Teams chat - <Chat title> - YYYYMMDD-YYYYMMDD.txt
 - batch-report.txt
 - batch-operation-log.txt
 - chat-operation-log.txt
@@ -139,7 +169,7 @@ Windows helper
 Helper работает on-demand: Chrome запускает его только на время файловой операции.
 Он не устанавливается как Windows Service и не висит постоянно в фоне.
 
-NativeHost.cs в версии 2.5.3 не менялся относительно предыдущих рабочих версий helper, поэтому повторная установка helper обычно не требуется.
+NativeHost.cs в версии 2.6.0 не менялся относительно предыдущих рабочих версий helper, поэтому повторная установка helper обычно не требуется.
 
 Диагностика
 -----------
@@ -167,9 +197,11 @@ NativeHost.cs в версии 2.5.3 не менялся относительно
 - calendar.js - DOM adapter и UI automation Teams Calendar / Meeting / Recap
 - batch-background.js - coordinator пакетного экспорта встреч
 - batch-panel.js - UI пакетного режима встреч
-- chat-search.js - Teams Search adapter, KQL discovery и сбор полного контекста из message pane
+- chat-search.js - Teams Search adapter, KQL discovery, чтение открытого message pane и current-chat collector
 - chat-background.js - coordinator discovery чатов и недельного экспорта полного контекста
 - chat-panel.js - UI режима "Чаты за неделю"
+- current-chat-background.js - coordinator экспорта открытого текущего чата
+- current-chat-panel.js - UI режима "Текущий чат"
 - NativeHost.cs - сохранение файлов в Windows Documents
 - chrome.storage.local - состояния batch/chat и сохраненное имя пользователя
 - chrome.storage.session - текущая вкладка-владелец Side Panel

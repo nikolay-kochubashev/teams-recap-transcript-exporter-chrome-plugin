@@ -111,7 +111,7 @@
     startBtn.disabled = running;
     stopBtn.disabled = !running;
     resetBtn.disabled = running;
-    openFolderBtn.disabled = !state?.folderPath;
+    openFolderBtn.disabled = !state?.filePath;
     diagnosticBtn.disabled = running;
     rangeMode.disabled = running;
     sinceInput.disabled = running;

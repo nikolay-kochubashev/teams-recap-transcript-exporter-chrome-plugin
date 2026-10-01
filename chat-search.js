@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = '2.5.3';
+  const VERSION = '2.6.0';
   const debugState = {
     stage: 'idle',
     lastQuery: '',
@@ -8,6 +8,8 @@
     error: ''
   };
 
+
+  let currentChatCancelRequested = false;
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
   function normalize(value) {
@@ -1017,6 +1019,146 @@
     };
   }
 
+
+  function currentChatPeriodBounds(request) {
+    const mode = String(request?.mode || 'all');
+    const startDate = String(request?.startDate || '');
+    const endDate = String(request?.endDate || '');
+
+    if (mode === 'all') {
+      return { mode, startDate: '', endDate: '' };
+    }
+
+    if (!/^\d{8}$/.test(startDate)) {
+      throw new Error('Некорректная начальная дата.');
+    }
+
+    return {
+      mode,
+      startDate,
+      endDate: /^\d{8}$/.test(endDate) ? endDate : localDateStamp(new Date())
+    };
+  }
+
+  async function collectCurrentChat(request) {
+    currentChatCancelRequested = false;
+    debugState.stage = 'current-chat';
+
+    const viewport = chatViewport();
+    if (!viewport) {
+      throw new Error('Не удалось найти область сообщений. Открой нужный чат Teams и повтори.');
+    }
+
+    const bounds = currentChatPeriodBounds(request);
+    const actualTitle = chatTitle() || 'Teams chat';
+    const collected = new Map();
+
+    const addVisible = () => {
+      for (const message of visibleChatMessages(viewport)) {
+        if (!message.key) continue;
+        collected.set(message.key, message);
+      }
+    };
+
+    const minStamp = () => {
+      const values = Array.from(collected.values()).map(x => x.stamp).filter(Boolean).sort();
+      return values[0] || '';
+    };
+
+    const maxStamp = () => {
+      const values = Array.from(collected.values()).map(x => x.stamp).filter(Boolean).sort();
+      return values.length ? values[values.length - 1] : '';
+    };
+
+    const assertNotCancelled = () => {
+      if (currentChatCancelRequested) throw new Error('Остановлено пользователем.');
+    };
+
+    addVisible();
+
+    let reachedStart = false;
+    let upStable = 0;
+    const maxUpSteps = bounds.mode === 'all' ? 1400 : 700;
+
+    for (let i = 0; i < maxUpSteps; i++) {
+      assertNotCancelled();
+
+      if (bounds.startDate && minStamp() && minStamp() < bounds.startDate) {
+        reachedStart = true;
+        break;
+      }
+
+      const moved = await nudgeChatViewport(viewport, -1);
+      addVisible();
+
+      if (!moved.moved || Number(viewport.scrollTop || 0) <= 1) upStable++;
+      else upStable = 0;
+
+      if (upStable >= 4) {
+        reachedStart = true;
+        break;
+      }
+    }
+
+    // After reaching the requested start/top, traverse forward to capture every
+    // virtualized row in order. This also returns the chat close to its latest messages.
+    let reachedEnd = false;
+    let downStable = 0;
+    const maxDownSteps = bounds.mode === 'all' ? 1800 : 1000;
+
+    for (let i = 0; i < maxDownSteps; i++) {
+      assertNotCancelled();
+
+      if (bounds.endDate && maxStamp() && maxStamp() > bounds.endDate) {
+        reachedEnd = true;
+        break;
+      }
+
+      const moved = await nudgeChatViewport(viewport, 1);
+      addVisible();
+
+      const atBottom =
+        Math.abs(
+          Number(viewport.scrollHeight || 0) -
+          Number(viewport.clientHeight || 0) -
+          Number(viewport.scrollTop || 0)
+        ) <= 3;
+
+      if (!moved.moved || atBottom) downStable++;
+      else downStable = 0;
+
+      if (downStable >= 4) {
+        reachedEnd = true;
+        break;
+      }
+    }
+
+    addVisible();
+
+    let messages = Array.from(collected.values());
+    if (bounds.startDate) messages = messages.filter(x => x.stamp >= bounds.startDate);
+    if (bounds.endDate) messages = messages.filter(x => x.stamp <= bounds.endDate);
+
+    messages.sort((a, b) => a.epoch - b.epoch || String(a.key).localeCompare(String(b.key)));
+
+    debugState.stage = 'ready';
+
+    return {
+      ok: true,
+      conversation: actualTitle,
+      mode: bounds.mode,
+      startDate: bounds.startDate,
+      endDate: bounds.endDate,
+      messages,
+      count: messages.length,
+      loaded: collected.size,
+      firstLoaded: minStamp(),
+      lastLoaded: maxStamp(),
+      reachedStart,
+      reachedEnd
+    };
+  }
+
   function diagnostic() {
     const dateButton = Array.from(document.querySelectorAll('button[data-tid="search-date-filter"]')).find(isRendered);
     const peopleButton = Array.from(document.querySelectorAll('button[data-tid="search-people-filter"]')).find(isRendered);
@@ -1100,6 +1242,37 @@
         sendResponse({ ok: false, error: error.message || String(error), diagnostic: diagnostic() });
       });
       return true;
+    }
+
+    if (type === 'CURRENT_CHAT_COLLECT') {
+      collectCurrentChat(message).then(sendResponse).catch(error => {
+        sendResponse({ ok: false, error: error.message || String(error), diagnostic: diagnostic() });
+      });
+      return true;
+    }
+
+    if (type === 'CURRENT_CHAT_CANCEL') {
+      currentChatCancelRequested = true;
+      sendResponse({ ok: true });
+      return;
+    }
+
+    if (type === 'CURRENT_CHAT_DIAGNOSTIC') {
+      const viewport = chatViewport();
+      sendResponse({
+        ok: true,
+        text: JSON.stringify({
+          version: VERSION,
+          title: chatTitle(),
+          viewport: !!viewport,
+          visibleMessages: visibleChatMessages(viewport).length,
+          firstVisible: visibleChatMessages(viewport)[0] || null,
+          lastVisible: visibleChatMessages(viewport).slice(-1)[0] || null,
+          url: location.href,
+          documentTitle: document.title
+        }, null, 2)
+      });
+      return;
     }
 
     if (type === 'CHAT_SEARCH_DIAGNOSTIC') {

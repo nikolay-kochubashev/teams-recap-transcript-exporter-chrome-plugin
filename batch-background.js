@@ -294,8 +294,30 @@ function todayStamp() {
 
 async function scanCalendar(tabId) {
   await appendOperation('SCAN_CALENDAR_START', { tabId });
-  const response = await sendTab(tabId, { type: 'CALENDAR_SCAN' }, 10000);
+
+  let response = await sendTab(tabId, { type: 'CALENDAR_SCAN' }, 10000);
   if (!response?.ok) throw new Error(response?.error || 'Не удалось прочитать календарь Teams.');
+
+  // The previous batch can leave Teams in a meeting chat. "Считать календарь"
+  // should be safe from any Teams screen: if Calendar is not open, navigate
+  // back to it first and then scan the actual calendar grid.
+  if (response.pageKind !== 'calendar') {
+    await appendOperation('SCAN_CALENDAR_NOT_ON_CALENDAR', {
+      tabId,
+      pageKind: response.pageKind || '',
+      url: response.url || ''
+    }, 'INFO');
+
+    const nav = await sendTab(tabId, { type: 'PAGE_OPEN_CALENDAR' }, 12000);
+    if (!nav?.ok) {
+      throw new Error(nav?.error || 'Не удалось открыть Calendar в Teams.');
+    }
+
+    await delay(900);
+    response = await sendTab(tabId, { type: 'CALENDAR_SCAN' }, 10000);
+    if (!response?.ok) throw new Error(response?.error || 'Не удалось прочитать календарь Teams после перехода в Calendar.');
+  }
+
   const meetings = (response.meetings || []).map(m => ({ ...m, status: 'pending' }));
   await appendOperation('SCAN_CALENDAR_RESULT', {
     tabId,

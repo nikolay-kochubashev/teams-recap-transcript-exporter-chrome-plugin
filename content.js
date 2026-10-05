@@ -2,7 +2,7 @@
   if (window.__teamsRecapTranscriptExporterLoaded) return;
   window.__teamsRecapTranscriptExporterLoaded = true;
 
-  const VERSION = '1.8.0';
+  const VERSION = '1.8.1';
   const state = {
     status: 'idle',
     message: 'Готово к работе.',
@@ -68,8 +68,14 @@
     if (!isRendered(el)) return false;
     const style = getComputedStyle(el);
     const overflowAllowsScroll = /^(?:auto|scroll|overlay)$/i.test(style.overflowY || '');
+
+    // Virtualized transcript page fragments can have scrollHeight slightly
+    // greater than clientHeight while overflow remains "visible". They are not
+    // independently scrollable and selecting them truncates the transcript.
+    if (!overflowAllowsScroll) return false;
+
     return el.scrollHeight > el.clientHeight + 8 ||
-      (overflowAllowsScroll && el.clientHeight > 80 && el.scrollHeight >= el.clientHeight);
+      (el.clientHeight > 80 && el.scrollHeight >= el.clientHeight);
   }
 
   const clockTimeRegex = /(?:^|\s)(?:\d{1,2}:)?\d{1,2}:\d{2}(?:\s|$)/g;

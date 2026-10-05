@@ -565,9 +565,11 @@
     const recording =
       findClickableByExactText(/^(?:recording|запись)(?:\s|$)/i) ||
       findClickableContainingText(/\b(?:recording|запись)\b/i);
+    // Never use a generic "contains transcript" fallback here. Current Teams
+    // renders feedback buttons such as "Is this transcript useful?"; clicking
+    // those does not open the transcript and can make the batch skip a valid meeting.
     const transcript =
-      findClickableByExactText(/^(?:transcript|транскрипт|расшифровка)(?:\s|$)/i) ||
-      findClickableContainingText(/\b(?:transcript|транскрипт|расшифровка)\b/i);
+      findClickableByExactText(/^(?:transcript|транскрипт|расшифровка)\s*$/i);
     const recapTab = findClickableByExactText(/^recap$/i);
     const chatTab = findClickableByExactText(/^chat$/i);
 
@@ -841,13 +843,24 @@
         if (!nav.ok) return null;
       }
 
+      // If the exact meeting card is already visible, do not run date
+      // navigation. visibleCalendarRange can include stale/hidden day columns
+      // from another part of the virtualized grid and may incorrectly move
+      // away from the week that already contains the requested meeting.
+      let card = findMeetingElement(meeting);
+      if (card) {
+        try { card.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (_) {}
+        await sleep(180);
+        return findMeetingElement(meeting) || card;
+      }
+
       if (meeting?.dateStamp) {
         const ensured = await ensureCalendarDate(meeting.dateStamp);
         if (!ensured.ok) return null;
       }
 
       await sleep(300);
-      const card = findMeetingElement(meeting);
+      card = findMeetingElement(meeting);
       if (!card) return null;
 
       try { card.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (_) {}

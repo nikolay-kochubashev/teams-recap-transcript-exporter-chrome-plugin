@@ -1,5 +1,6 @@
 const NATIVE_HOST = 'com.openai.teams_recap_transcript_exporter';
 const BATCH_KEY = 'teamsTranscriptBatchStateV5';
+const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 
 let stopRequested = false;
 let runPromise = null;
@@ -14,19 +15,36 @@ let batchState = {
   finishedAt: 0,
   message: 'Пакетный режим готов.',
   logs: [],
-  operationLog: []
+  operationLog: [],
+  extensionVersion: EXTENSION_VERSION
 };
 
 async function restoreBatchState() {
   try {
     const data = await chrome.storage.local.get(BATCH_KEY);
-    if (data?.[BATCH_KEY]) {
+    const stored = data?.[BATCH_KEY];
+    if (!stored) return;
+
+    // Calendar DOM contracts can change between extension versions. Do not keep
+    // a meeting list scanned by the previous version after Reload - it can be
+    // incomplete and its DOM ids can already be stale.
+    if (stored.extensionVersion !== EXTENSION_VERSION) {
       batchState = {
         ...batchState,
-        ...data[BATCH_KEY],
-        status: data[BATCH_KEY].status === 'running' ? 'interrupted' : data[BATCH_KEY].status
+        status: 'idle',
+        message: 'Расширение обновлено. Нажми "Считать календарь" заново.',
+        extensionVersion: EXTENSION_VERSION
       };
+      await persistBatchState();
+      return;
     }
+
+    batchState = {
+      ...batchState,
+      ...stored,
+      extensionVersion: EXTENSION_VERSION,
+      status: stored.status === 'running' ? 'interrupted' : stored.status
+    };
   } catch (_) {}
 }
 
@@ -79,31 +97,83 @@ function nativeMessage(message) {
   });
 }
 
+function isMissingReceiverError(error) {
+  const message = String(error?.message || error || '');
+  return /receiving end does not exist|could not establish connection/i.test(message);
+}
+
+async function injectTopFrameScripts(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId, frameIds: [0] },
+    files: ['content.js', 'calendar.js', 'chat-search.js']
+  });
+}
+
+async function injectContentFrame(tabId, frameId) {
+  await chrome.scripting.executeScript({
+    target: { tabId, frameIds: [frameId] },
+    files: ['content.js']
+  });
+}
+
 async function sendTab(tabId, message, timeoutMs = 12000) {
   const started = Date.now();
   let lastError = null;
+  let reinjected = false;
+
   while (Date.now() - started < timeoutMs) {
     try {
       return await chrome.tabs.sendMessage(tabId, message);
     } catch (e) {
       lastError = e;
+
+      // Reloading an unpacked extension disconnects the old content-script
+      // context from already open Teams tabs. Heal that case automatically
+      // instead of retrying the same dead receiver until timeout.
+      if (!reinjected && isMissingReceiverError(e)) {
+        try {
+          await injectTopFrameScripts(tabId);
+          reinjected = true;
+          await delay(250);
+          continue;
+        } catch (injectError) {
+          lastError = injectError;
+        }
+      }
+
       await delay(300);
     }
   }
+
   throw new Error(lastError?.message || 'Страница не ответила расширению.');
 }
 
 async function sendFrame(tabId, frameId, message, timeoutMs = 12000) {
   const started = Date.now();
   let lastError = null;
+  let reinjected = false;
+
   while (Date.now() - started < timeoutMs) {
     try {
       return await chrome.tabs.sendMessage(tabId, message, { frameId });
     } catch (e) {
       lastError = e;
+
+      if (!reinjected && isMissingReceiverError(e)) {
+        try {
+          await injectContentFrame(tabId, frameId);
+          reinjected = true;
+          await delay(200);
+          continue;
+        } catch (injectError) {
+          lastError = injectError;
+        }
+      }
+
       await delay(250);
     }
   }
+
   throw new Error(lastError?.message || `Frame ${frameId} did not answer extension.`);
 }
 

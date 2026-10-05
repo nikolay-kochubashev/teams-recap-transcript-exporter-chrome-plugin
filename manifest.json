@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Teams Recap Transcript Exporter",
-  "version": "2.6.1",
+  "version": "2.6.2",
   "description": "Exports Microsoft Teams Recap transcripts, weekly chat context, and the currently open Teams chat.",
   "permissions": [
     "sidePanel",

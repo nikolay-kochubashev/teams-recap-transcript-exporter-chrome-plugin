@@ -236,7 +236,7 @@
     const context = currentCalendarMonthYear();
     if (!context) return [];
 
-    const columns = [];
+    const raw = [];
     for (const el of document.querySelectorAll('body *')) {
       if (!isRendered(el)) continue;
       const text = normalize(el.innerText || el.textContent || '');
@@ -244,16 +244,46 @@
       const day = Number(text.match(/^\d{1,2}/)?.[0] || 0);
       if (!day) continue;
       const r = el.getBoundingClientRect();
-      columns.push({
+      raw.push({
         day,
-        month: context.month,
-        year: context.year,
         centerX: r.left + r.width / 2,
         left: r.left,
         right: r.right
       });
     }
-    return columns;
+
+    // Day headers are laid out chronologically from left to right. A Work week
+    // can cross a month/year boundary (e.g. 28 Sep - 02 Oct). Previously every
+    // header inherited the first month from the toolbar, producing a fake range
+    // such as 01 Sep - 30 Sep and making Calendar bounce forever between weeks.
+    const ordered = raw
+      .sort((a, b) => a.centerX - b.centerX)
+      .filter((x, i, arr) =>
+        i === 0 ||
+        Math.abs(x.centerX - arr[i - 1].centerX) > 4 ||
+        x.day !== arr[i - 1].day
+      );
+
+    let month = context.month;
+    let year = context.year;
+    let previousDay = null;
+
+    return ordered.map(col => {
+      if (previousDay !== null && col.day < previousDay) {
+        month += 1;
+        if (month > 12) {
+          month = 1;
+          year += 1;
+        }
+      }
+
+      previousDay = col.day;
+      return {
+        ...col,
+        month,
+        year
+      };
+    });
   }
 
   function inferDateFromColumn(rect, dayColumns) {

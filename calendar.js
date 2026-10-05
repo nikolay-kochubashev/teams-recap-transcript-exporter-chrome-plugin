@@ -241,34 +241,61 @@
       if (!isRendered(el)) continue;
       const text = normalize(el.innerText || el.textContent || '');
       if (!/^\d{1,2}\s+(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)$/i.test(text)) continue;
+
       const day = Number(text.match(/^\d{1,2}/)?.[0] || 0);
       if (!day) continue;
+
       const r = el.getBoundingClientRect();
+
+      // Teams keeps stale virtualized calendar headers in the DOM. They still
+      // have dimensions, so isRendered() alone is not enough. Only use the
+      // header row that is actually inside the current viewport.
+      if (r.bottom <= 0 || r.top >= innerHeight || r.right <= 0 || r.left >= innerWidth) continue;
+
       raw.push({
         day,
+        top: r.top,
         centerX: r.left + r.width / 2,
         left: r.left,
         right: r.right
       });
     }
 
-    // Day headers are laid out chronologically from left to right. A Work week
-    // can cross a month/year boundary (e.g. 28 Sep - 02 Oct). Previously every
-    // header inherited the first month from the toolbar, producing a fake range
-    // such as 01 Sep - 30 Sep and making Calendar bounce forever between weeks.
-    const ordered = raw
-      .sort((a, b) => a.centerX - b.centerX)
-      .filter((x, i, arr) =>
-        i === 0 ||
-        Math.abs(x.centerX - arr[i - 1].centerX) > 4 ||
-        x.day !== arr[i - 1].day
-      );
+    if (!raw.length) return [];
 
+    // There can still be nested duplicate nodes for each day header. Group by
+    // visual row and keep the row with the largest number of distinct columns.
+    const rows = [];
+    for (const col of raw.sort((a, b) => a.top - b.top || a.centerX - b.centerX)) {
+      let row = rows.find(x => Math.abs(x.top - col.top) <= 6);
+      if (!row) {
+        row = { top: col.top, cols: [] };
+        rows.push(row);
+      }
+      row.cols.push(col);
+    }
+
+    const bestRow = rows
+      .map(row => {
+        const cols = row.cols
+          .sort((a, b) => a.centerX - b.centerX)
+          .filter((x, i, arr) =>
+            i === 0 || Math.abs(x.centerX - arr[i - 1].centerX) > 8
+          );
+        return { ...row, cols };
+      })
+      .filter(row => row.cols.length >= 3)
+      .sort((a, b) => b.cols.length - a.cols.length || a.top - b.top)[0];
+
+    if (!bestRow) return [];
+
+    // Day headers are chronological from left to right. This correctly handles
+    // mixed toolbar captions such as "September 2026 - October 2026".
     let month = context.month;
     let year = context.year;
     let previousDay = null;
 
-    return ordered.map(col => {
+    return bestRow.cols.map(col => {
       if (previousDay !== null && col.day < previousDay) {
         month += 1;
         if (month > 12) {
@@ -279,9 +306,12 @@
 
       previousDay = col.day;
       return {
-        ...col,
+        day: col.day,
         month,
-        year
+        year,
+        centerX: col.centerX,
+        left: col.left,
+        right: col.right
       };
     });
   }
@@ -323,17 +353,55 @@
     return score;
   }
 
-  function scanCalendarMeetings() {
-    const cards = Array.from(
+  function calendarEventElements() {
+    const out = [];
+    const seen = new Set();
+
+    const exact = Array.from(
       document.querySelectorAll('[data-testid="calendar-in-day-event-card"]')
     ).filter(isRendered);
+
+    for (const el of exact) {
+      const label = normalize(el.getAttribute('aria-label') || accessibleText(el));
+      if (!label || seen.has(label)) continue;
+      seen.add(label);
+      out.push({ el, label, adapter: 'calendar-in-day-event-card', score: 1000 });
+    }
+
+    // Teams renders some visible event variants without the canonical
+    // calendar-in-day-event-card test id. Recover them conservatively from an
+    // explicit dated aria-label + time range, instead of scanning arbitrary text.
+    for (const el of document.querySelectorAll('[aria-label]')) {
+      if (!isRendered(el)) continue;
+      const label = normalize(el.getAttribute('aria-label') || '');
+      if (!label || seen.has(label)) continue;
+
+      const date = parseFlexibleDate(label, currentCalendarMonthYear()?.year);
+      const range = parseExplicitTimeRange(label);
+      if (!date || !range) continue;
+
+      const score = meetingCandidateScore(el, label);
+      if (score < 70) continue;
+
+      const r = el.getBoundingClientRect();
+      if (r.width < 20 || r.height < 12 || r.width > innerWidth * 0.8) continue;
+
+      seen.add(label);
+      out.push({ el, label, adapter: 'calendar-aria-event', score });
+    }
+
+    return out;
+  }
+
+  function scanCalendarMeetings() {
+    const cards = calendarEventElements();
 
     const calendarContext = currentCalendarMonthYear();
     const meetings = [];
     const debugCandidates = [];
 
-    for (const el of cards) {
-      const label = normalize(el.getAttribute('aria-label') || accessibleText(el));
+    for (const candidate of cards) {
+      const { el, label, adapter, score } = candidate;
       if (!label) continue;
 
       const date = parseFlexibleDate(label, calendarContext?.year);
@@ -357,11 +425,11 @@
         endTime: endTimeText,
         sortKey: toSortKey(date, startTime, meetings.length),
         href: '',
-        score: 1000,
+        score,
         dom: {
-          adapter: 'calendar-in-day-event-card',
+          adapter,
           elementId,
-          dataTestId: 'calendar-in-day-event-card',
+          dataTestId: el.getAttribute('data-testid') || '',
           ariaLabel: label
         },
         rect: {
@@ -373,7 +441,7 @@
       };
 
       meetings.push(meeting);
-      if (debugCandidates.length < 80) {
+      if (debugCandidates.length < 120) {
         debugCandidates.push({
           id,
           title,
@@ -381,6 +449,8 @@
           startTime: startTimeText,
           endTime: endTimeText,
           elementId,
+          adapter,
+          score,
           ariaLabel: label
         });
       }
@@ -400,30 +470,32 @@
   function findMeetingElement(meeting) {
     if (!meeting) return null;
 
+    const expectedLabel = normalize(meeting.label);
     const byId = meeting.dom?.elementId
       ? document.getElementById(meeting.dom.elementId)
       : null;
 
     if (
       byId &&
-      byId.matches?.('[data-testid="calendar-in-day-event-card"]') &&
-      isRendered(byId)
+      isRendered(byId) &&
+      (
+        !expectedLabel ||
+        normalize(byId.getAttribute('aria-label') || accessibleText(byId)) === expectedLabel
+      )
     ) {
       return byId;
     }
 
-    const cards = Array.from(
-      document.querySelectorAll('[data-testid="calendar-in-day-event-card"]')
-    ).filter(isRendered);
+    const cards = calendarEventElements().map(x => x.el);
 
     const exact = cards.find(el =>
-      normalize(el.getAttribute('aria-label') || '') === normalize(meeting.label)
+      normalize(el.getAttribute('aria-label') || accessibleText(el)) === expectedLabel
     );
     if (exact) return exact;
 
     const expectedTitle = normalizedComparable(meeting.title);
     return cards.find(el => {
-      const label = normalize(el.getAttribute('aria-label') || '');
+      const label = normalize(el.getAttribute('aria-label') || accessibleText(el));
       const title = normalizedComparable(cleanMeetingTitle(label));
       const dateStamp = toDateStamp(parseFlexibleDate(label, currentCalendarMonthYear()?.year));
       return title === expectedTitle && dateStamp === meeting.dateStamp;

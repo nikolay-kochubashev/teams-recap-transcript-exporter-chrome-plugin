@@ -4,6 +4,12 @@ let currentFrameId = null;
 let pollTimer = null;
 let nativeAvailable = false;
 let lastSaved = null;
+let autoSaveInFlightKey = '';
+let autoSaveAttemptedRunKey = '';
+let autoSaveCompletedRunKey = '';
+let autoSaveMessage = '';
+
+const AUTO_SAVE_STORAGE_KEY = 'currentTranscriptAutoSavedRunKeysV1';
 
 const NATIVE_HOST = 'com.openai.teams_recap_transcript_exporter';
 
@@ -12,7 +18,6 @@ const stopBtn = document.getElementById('stop');
 const debugBtn = document.getElementById('debug');
 const clearBtn = document.getElementById('clear');
 const copyBtn = document.getElementById('copy');
-const txtBtn = document.getElementById('txt');
 const showFolderBtn = document.getElementById('showFolder');
 const output = document.getElementById('output');
 const statusEl = document.getElementById('status');
@@ -37,9 +42,43 @@ function localDateStamp() {
   return `${yyyy}${mm}${dd}`;
 }
 
-function transcriptFileName() {
-  const title = sanitizeFileName(currentState?.title || 'teams-transcript');
+function transcriptFileName(state = currentState) {
+  const title = sanitizeFileName(state?.title || 'teams-transcript');
   return `${title} - ${localDateStamp()}.txt`;
+}
+
+function autoSaveRunKey(state) {
+  if (!state || state.status !== 'done' || !state.text || !state.finishedAt) return '';
+  return [
+    currentTabId || 0,
+    currentFrameId ?? 'top',
+    state.startedAt || 0,
+    state.finishedAt || 0,
+    state.chars || state.text.length || 0,
+    state.title || ''
+  ].join('|');
+}
+
+async function loadAutoSavedRunKeys() {
+  try {
+    const data = await chrome.storage.session.get(AUTO_SAVE_STORAGE_KEY);
+    const values = Array.isArray(data?.[AUTO_SAVE_STORAGE_KEY])
+      ? data[AUTO_SAVE_STORAGE_KEY]
+      : [];
+    return new Set(values);
+  } catch (_) {
+    return new Set();
+  }
+}
+
+async function rememberAutoSavedRunKey(runKey) {
+  if (!runKey) return;
+  try {
+    const keys = await loadAutoSavedRunKeys();
+    keys.add(runKey);
+    const values = Array.from(keys).slice(-50);
+    await chrome.storage.session.set({ [AUTO_SAVE_STORAGE_KEY]: values });
+  } catch (_) {}
 }
 
 function diagnosticFileName() {
@@ -138,9 +177,9 @@ async function detectNativeHost() {
 
 function renderSaveMode() {
   if (nativeAvailable) {
-    saveModeEl.textContent = 'Сохранение: Windows Documents. Кнопка "Открыть каталог" покажет сохраненный файл в Проводнике.';
+    saveModeEl.textContent = 'После завершения транскрипт автоматически сохраняется в Windows Documents. Кнопка "Открыть каталог" покажет сохраненный файл в Проводнике.';
   } else {
-    saveModeEl.textContent = 'Сохранение: стандартная папка загрузок Chrome. Чтобы сохранять напрямую в Windows Documents, один раз запусти Install-Windows-Integration.cmd из папки расширения.';
+    saveModeEl.textContent = 'После завершения транскрипт автоматически сохраняется в стандартную папку загрузок Chrome. Чтобы сохранять напрямую в Windows Documents, один раз запусти Install-Windows-Integration.cmd из папки расширения.';
   }
 }
 
@@ -160,7 +199,6 @@ function render(state) {
   debugBtn.disabled = running;
   clearBtn.disabled = running;
   copyBtn.disabled = !hasText;
-  txtBtn.disabled = !hasText;
   showFolderBtn.disabled = !lastSaved;
 
   const progress = Number.isFinite(state?.progress) ? state.progress : 0;
@@ -171,7 +209,14 @@ function render(state) {
       ? `100% - блоков: ${state.items || 0}, символов: ${state.chars || 0}`
       : '';
 
-  statusEl.textContent = state?.message || 'Готово к работе.';
+  const runKey = autoSaveRunKey(state);
+  if (runKey && runKey === autoSaveInFlightKey) {
+    statusEl.textContent = 'Транскрипция собрана. Автоматически сохраняю TXT...';
+  } else if (runKey && runKey === autoSaveCompletedRunKey && autoSaveMessage) {
+    statusEl.textContent = autoSaveMessage;
+  } else {
+    statusEl.textContent = state?.message || 'Готово к работе.';
+  }
 
   if (hasText) {
     if (output.value !== state.text) output.value = state.text;
@@ -180,11 +225,49 @@ function render(state) {
   }
 }
 
+async function maybeAutoSaveTranscript(state) {
+  const runKey = autoSaveRunKey(state);
+  if (!runKey) return;
+  if (runKey === autoSaveInFlightKey || runKey === autoSaveAttemptedRunKey) return;
+
+  const alreadySaved = await loadAutoSavedRunKeys();
+  if (alreadySaved.has(runKey)) {
+    autoSaveAttemptedRunKey = runKey;
+    autoSaveCompletedRunKey = runKey;
+    autoSaveMessage = 'Готово. TXT уже был автоматически сохранен для этого запуска.';
+    render(state);
+    return;
+  }
+
+  autoSaveAttemptedRunKey = runKey;
+  autoSaveInFlightKey = runKey;
+  autoSaveMessage = '';
+  render(state);
+
+  try {
+    const fileName = transcriptFileName(state);
+    const saved = await saveText(state.text, fileName);
+    await rememberAutoSavedRunKey(runKey);
+
+    autoSaveCompletedRunKey = runKey;
+    autoSaveMessage = saved.mode === 'documents'
+      ? `Готово. TXT автоматически сохранен: ${saved.path}`
+      : `Готово. TXT автоматически сохранен в папку загрузок Chrome: ${fileName}`;
+  } catch (e) {
+    autoSaveCompletedRunKey = runKey;
+    autoSaveMessage = `Ошибка автоматического сохранения TXT: ${e.message || e}`;
+  } finally {
+    autoSaveInFlightKey = '';
+    render(state);
+  }
+}
+
 async function refreshState() {
   try {
     const response = await sendToActiveTab({ type: 'GET_STATE' });
     if (!response?.ok) throw new Error('Не удалось получить состояние сборщика.');
     render(response.state);
+    await maybeAutoSaveTranscript(response.state);
   } catch (e) {
     setLocalError(e.message || String(e));
   }
@@ -233,6 +316,13 @@ async function saveText(text, fileName) {
 
 extractBtn.addEventListener('click', async () => {
   try {
+    lastSaved = null;
+    autoSaveInFlightKey = '';
+    autoSaveAttemptedRunKey = '';
+    autoSaveCompletedRunKey = '';
+    autoSaveMessage = '';
+    showFolderBtn.disabled = true;
+
     const response = await sendToActiveTab({ type: 'START_EXTRACT' });
     if (response?.state) render(response.state);
     startPolling();
@@ -252,6 +342,13 @@ stopBtn.addEventListener('click', async () => {
 
 clearBtn.addEventListener('click', async () => {
   try {
+    lastSaved = null;
+    autoSaveInFlightKey = '';
+    autoSaveAttemptedRunKey = '';
+    autoSaveCompletedRunKey = '';
+    autoSaveMessage = '';
+    showFolderBtn.disabled = true;
+
     const response = await sendToActiveTab({ type: 'CLEAR_RESULT' });
     if (response?.state) render(response.state);
   } catch (e) {
@@ -287,20 +384,6 @@ copyBtn.addEventListener('click', async () => {
   }
 });
 
-txtBtn.addEventListener('click', async () => {
-  const text = currentState?.text || output.value || '';
-  if (!text) return;
-  try {
-    const fileName = transcriptFileName();
-    const saved = await saveText(text, fileName);
-    statusEl.textContent = saved.mode === 'documents'
-      ? `TXT сохранен: ${saved.path}`
-      : `TXT сохранен в папку загрузок Chrome: ${fileName}`;
-  } catch (e) {
-    setLocalError(e.message || String(e));
-  }
-});
-
 showFolderBtn.addEventListener('click', async () => {
   if (!lastSaved) return;
   try {
@@ -318,6 +401,10 @@ showFolderBtn.addEventListener('click', async () => {
 chrome.tabs.onActivated.addListener(() => {
   currentFrameId = null;
   lastSaved = null;
+  autoSaveInFlightKey = '';
+  autoSaveAttemptedRunKey = '';
+  autoSaveCompletedRunKey = '';
+  autoSaveMessage = '';
   showFolderBtn.disabled = true;
   refreshState();
 });
@@ -326,6 +413,10 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (tabId === currentTabId && changeInfo.status === 'complete') {
     currentFrameId = null;
     lastSaved = null;
+    autoSaveInFlightKey = '';
+    autoSaveAttemptedRunKey = '';
+    autoSaveCompletedRunKey = '';
+    autoSaveMessage = '';
     showFolderBtn.disabled = true;
     setTimeout(refreshState, 400);
   }

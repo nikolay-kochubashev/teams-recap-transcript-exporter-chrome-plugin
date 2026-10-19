@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = '2.6.0';
+  const VERSION = '2.6.6';
   const debugState = {
     stage: 'idle',
     lastQuery: '',
@@ -101,6 +101,67 @@
       month: 'long',
       year: 'numeric'
     }).format(date);
+  }
+
+  function comparableDateText(value) {
+    return normalize(value)
+      .toLocaleLowerCase()
+      .replace(/[,.]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function dateTextVariants(stamp) {
+    if (!/^\d{8}$/.test(String(stamp || ''))) return [];
+
+    const yyyy = Number(stamp.slice(0, 4));
+    const mm = Number(stamp.slice(4, 6));
+    const dd = Number(stamp.slice(6, 8));
+    const date = new Date(yyyy, mm - 1, dd);
+
+    const locales = Array.from(new Set([
+      document.documentElement.lang || '',
+      'en-GB',
+      'en-US',
+      'ru-RU'
+    ].filter(Boolean)));
+
+    const variants = new Set();
+    for (const locale of locales) {
+      try {
+        variants.add(comparableDateText(new Intl.DateTimeFormat(locale, {
+          day: 'numeric',
+          month: 'long',
+          year: 'numeric'
+        }).format(date)));
+      } catch (_) {}
+    }
+
+    variants.add(comparableDateText(
+      String(dd).padStart(2, '0') + '/' + String(mm).padStart(2, '0') + '/' + yyyy
+    ));
+    variants.add(comparableDateText(
+      String(mm).padStart(2, '0') + '/' + String(dd).padStart(2, '0') + '/' + yyyy
+    ));
+    variants.add(comparableDateText(
+      yyyy + '-' + String(mm).padStart(2, '0') + '-' + String(dd).padStart(2, '0')
+    ));
+
+    return Array.from(variants).filter(Boolean);
+  }
+
+  function appliedDateButtonMatches(button, startStamp, endStamp) {
+    if (!button) return false;
+
+    const text = comparableDateText([
+      button.getAttribute('aria-label') || '',
+      button.getAttribute('title') || '',
+      button.innerText || button.textContent || ''
+    ].join(' '));
+
+    const fromMatches = dateTextVariants(startStamp).some(x => text.includes(x));
+    const toMatches = dateTextVariants(endStamp).some(x => text.includes(x));
+    return fromMatches && toMatches;
   }
 
   function findSearchInput() {
@@ -410,10 +471,10 @@
       const visiblePopup = findDatePopup();
       const button = Array.from(document.querySelectorAll('button[data-tid="search-date-filter"]'))
         .find(isRendered);
-      const label = normalize(button?.getAttribute('aria-label'));
-      const hasFrom = label.toLocaleLowerCase().includes(fromText.toLocaleLowerCase());
-      const hasTo = label.toLocaleLowerCase().includes(toText.toLocaleLowerCase());
-      return !visiblePopup && button && hasFrom && hasTo ? button : null;
+
+      return !visiblePopup && appliedDateButtonMatches(button, startStamp, endStamp)
+        ? button
+        : null;
     }, 10000).catch(() => null);
 
     if (!appliedButton) {

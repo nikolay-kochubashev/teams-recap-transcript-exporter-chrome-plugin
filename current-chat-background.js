@@ -89,10 +89,13 @@
   }
 
   function periodText(state) {
-    if (state.mode === 'all') return 'весь доступный чат';
+    if (state.mode === 'all') return 'все доступные сообщения';
     if (state.mode === 'months') {
       return 'последние ' + state.months + ' мес. (' +
         displayStamp(state.startDate) + ' - ' + displayStamp(state.endDate) + ')';
+    }
+    if (state.mode === 'period') {
+      return 'за период ' + displayStamp(state.startDate) + ' - ' + displayStamp(state.endDate);
     }
     return 'с ' + displayStamp(state.startDate) + ' по ' + displayStamp(state.endDate);
   }
@@ -142,7 +145,7 @@
 
     let state = await patchState({
       status: 'running',
-      message: 'Читаю текущий чат...',
+      message: 'Читаю сообщения текущего чата...',
       tabId: request.tabId,
       mode: request.mode || 'all',
       startDate: request.startDate || '',
@@ -166,8 +169,8 @@
         folderPath: folder.path,
         progress: 18,
         message: state.mode === 'all'
-          ? 'Прокручиваю чат до самого начала...'
-          : 'Прокручиваю чат до начала выбранного периода...'
+          ? 'Прокручиваю сообщения до самого начала...'
+          : 'Прокручиваю сообщения до начала выбранного диапазона...'
       });
 
       const result = await sendToTab(request.tabId, {
@@ -178,7 +181,7 @@
       });
 
       if (!result?.ok) {
-        throw new Error(result?.error || 'Не удалось прочитать текущий чат.');
+        throw new Error(result?.error || 'Не удалось прочитать сообщения текущего чата.');
       }
 
       if (stopRequested) throw new Error('Остановлено пользователем.');
@@ -221,7 +224,7 @@
       await patchState({
         status: stopped ? 'stopped' : 'error',
         message: stopped
-          ? 'Сбор текущего чата остановлен.'
+          ? 'Сбор сообщений текущего чата остановлен.'
           : 'Ошибка: ' + (error?.message || error),
         error: stopped ? '' : (error?.message || String(error)),
         finishedAt: new Date().toISOString()
@@ -260,7 +263,7 @@
         if (!runningPromise) {
           const state = await patchState({
             status: 'stopped',
-            message: 'Сбор текущего чата остановлен.',
+            message: 'Сбор сообщений текущего чата остановлен.',
             error: '',
             finishedAt: new Date().toISOString()
           });

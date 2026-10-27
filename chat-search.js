@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = '2.6.6';
+  const VERSION = '2.6.9';
   const debugState = {
     stage: 'idle',
     lastQuery: '',
@@ -1094,10 +1094,18 @@
       throw new Error('Некорректная начальная дата.');
     }
 
+    const effectiveEndDate = /^\d{8}$/.test(endDate)
+      ? endDate
+      : localDateStamp(new Date());
+
+    if (startDate > effectiveEndDate) {
+      throw new Error('Дата начала периода не может быть позже даты окончания.');
+    }
+
     return {
       mode,
       startDate,
-      endDate: /^\d{8}$/.test(endDate) ? endDate : localDateStamp(new Date())
+      endDate: effectiveEndDate
     };
   }
 

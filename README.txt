@@ -1,4 +1,4 @@
-Teams Recap Transcript Exporter v2.6.7
+Teams Recap Transcript Exporter v2.6.8
 
 Назначение
 ----------
@@ -12,7 +12,9 @@ Chrome-расширение для сбора рабочих материало�
 1. Текущая встреча
    - Открыть запись встречи / Recap / Transcript.
    - Нажать "Собрать транскрипцию".
-   - Экспортировать TXT в Windows Documents.
+   - После завершения content script передает результат в background service worker.
+   - TXT сохраняется автоматически, независимо от того, открыт ли Side Panel на этой вкладке.
+   - Несколько вкладок могут собирать и сохранять транскрипты параллельно и независимо.
 
 2. Пакет из календаря
    - Открыть Teams Web -> Calendar.
@@ -210,7 +212,8 @@ NativeHost.cs в версии 2.6.4 не менялся относительно
 -----------------------
 - Manifest V3 Chrome Extension
 - background.js - lifecycle расширения и tab-scoped Side Panel
-- content.js - lazy-loading Transcript collector для Teams / SharePoint frames
+- current-transcript-background.js - per-tab/per-frame сохранение завершенных транскриптов независимо от Side Panel
+- content.js - lazy-loading Transcript collector для Teams / SharePoint frames; после завершения отправляет CURRENT_TRANSCRIPT_DONE в background
 - calendar.js - DOM adapter и UI automation Teams Calendar / Meeting / Recap
 - batch-background.js - coordinator пакетного экспорта встреч
 - batch-panel.js - UI пакетного режима встреч
@@ -250,3 +253,13 @@ Teams Search используется только для discovery. Полны�
 - после автосохранения кнопка "Открыть каталог" открывает сохраненный результат;
 - при доступном Windows helper файл сохраняется в Windows Documents, иначе используется стандартная папка загрузок Chrome;
 - повторный polling одного и того же завершенного запуска не создает повторных сохранений.
+
+
+В версии 2.6.8:
+- автоматическое сохранение режима "Текущая встреча" перенесено из Side Panel в background service worker;
+- каждый завершенный Transcript идентифицируется по tabId + frameId + run timestamps и сохраняется независимо;
+- можно одновременно запустить сбор в нескольких вкладках: переключение Side Panel больше не влияет на сохранение файлов;
+- Side Panel теперь только отображает per-tab статус background-сохранения и открывает файл именно текущей вкладки;
+- имена файлов текущих встреч содержат дату и время запуска, чтобы параллельные сборы не перезаписывали друг друга;
+- при недоступном Windows helper background использует Chrome Downloads как fallback;
+- повторное сообщение о том же run дедуплицируется и не создает второй файл.

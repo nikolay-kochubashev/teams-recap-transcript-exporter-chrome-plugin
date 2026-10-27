@@ -2,7 +2,7 @@
   if (window.__teamsRecapTranscriptExporterLoaded) return;
   window.__teamsRecapTranscriptExporterLoaded = true;
 
-  const VERSION = '1.8.1';
+  const VERSION = '1.8.2';
   const state = {
     status: 'idle',
     message: 'Готово к работе.',
@@ -767,8 +767,8 @@
       update({
         status: 'done',
         message: rows.length
-          ? `Готово. Один проход завершен. Собрано реплик: ${rows.length}.`
-          : 'Готово. Один проход завершен, возвращены собранные DOM-фрагменты.',
+          ? `Готово. Один проход завершен. Собрано реплик: ${rows.length}. Сохраняю TXT...`
+          : 'Готово. Один проход завершен, возвращены собранные DOM-фрагменты. Сохраняю TXT...',
         progress: 100,
         items: rows.length || rawSnapshots.size,
         chars: text.length,
@@ -776,6 +776,8 @@
         error: '',
         finishedAt: Date.now()
       });
+
+      await notifyBackgroundTranscriptDone();
     } catch (e) {
       update({
         status: 'error',
@@ -785,6 +787,35 @@
       });
     } finally {
       runningPromise = null;
+    }
+  }
+
+  async function notifyBackgroundTranscriptDone() {
+    const result = publicState();
+    if (result.status !== 'done' || !result.text) return;
+
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'CURRENT_TRANSCRIPT_DONE',
+        result
+      });
+
+      if (response?.ok && response?.state?.status === 'saved') {
+        const saved = response.state;
+        update({
+          message: saved.mode === 'documents'
+            ? `Готово. TXT автоматически сохранен: ${saved.path}`
+            : `Готово. TXT автоматически сохранен в загрузки Chrome: ${saved.fileName}`
+        });
+      } else if (response?.error) {
+        update({
+          message: `Транскрипция собрана, но TXT сохранить не удалось: ${response.error}`
+        });
+      }
+    } catch (error) {
+      update({
+        message: `Транскрипция собрана, но background-сохранение недоступно: ${error?.message || error}`
+      });
     }
   }
 

@@ -8,7 +8,7 @@
   function blankState() {
     return {
       status: 'idle',
-      message: 'Открой нужный чат Teams.',
+      message: 'Открой нужный чат Teams и выбери диапазон сообщений.',
       tabId: null,
       mode: 'all',
       startDate: '',

@@ -14,7 +14,7 @@
       <button id="modeCurrent" class="mode-tab active">Текущая встреча</button>
       <button id="modeBatch" class="mode-tab">Пакет из календаря</button>
       <button id="modeChat" class="mode-tab">Чаты за неделю</button>
-      <button id="modeCurrentChat" class="mode-tab">Текущий чат</button>
+      <button id="modeCurrentChat" class="mode-tab">Сообщения чата</button>
     </div>
 
     <section id="currentSection">
@@ -84,17 +84,25 @@
     </section>
 
     <section id="currentChatSection" hidden>
-      <p class="hint">Читает открытый сейчас чат Teams целиком или за выбранный период. Teams Search не используется.</p>
+      <p class="hint">Читает сообщения открытого сейчас чата Teams за выбранный диапазон. Teams Search не используется.</p>
 
-      <label class="field-label" for="currentChatRangeMode">Период</label>
+      <label class="field-label" for="currentChatRangeMode">Диапазон сообщений</label>
       <select id="currentChatRangeMode" class="text-input">
-        <option value="all">Весь доступный чат</option>
-        <option value="since">С указанной даты</option>
-        <option value="months">Последние N месяцев</option>
+        <option value="all">Все доступные сообщения</option>
+        <option value="period">За период</option>
+        <option value="since">С указанной даты по сегодня</option>
+        <option value="months">За последние N месяцев</option>
       </select>
 
+      <div id="currentChatPeriodWrap" class="range-field" hidden>
+        <label class="field-label" for="currentChatPeriodFrom">С даты</label>
+        <input id="currentChatPeriodFrom" class="text-input" type="date" />
+        <label class="field-label" for="currentChatPeriodTo">По дату</label>
+        <input id="currentChatPeriodTo" class="text-input" type="date" />
+      </div>
+
       <div id="currentChatSinceWrap" class="range-field" hidden>
-        <label class="field-label" for="currentChatSince">Читать с даты</label>
+        <label class="field-label" for="currentChatSince">С даты</label>
         <input id="currentChatSince" class="text-input" type="date" />
       </div>
 
@@ -104,7 +112,7 @@
       </div>
 
       <div class="actions primary-actions">
-        <button id="startCurrentChatExport" class="primary">Прочитать чат</button>
+        <button id="startCurrentChatExport" class="primary">Считать сообщения</button>
         <button id="stopCurrentChatExport" disabled>Остановить</button>
       </div>
 
@@ -113,12 +121,12 @@
         <div id="currentChatMetrics" class="progress-text"></div>
       </div>
 
-      <div id="currentChatStatus" class="status">Открой нужный чат Teams.</div>
+      <div id="currentChatStatus" class="status">Открой нужный чат Teams и выбери диапазон сообщений.</div>
       <div class="save-mode">Результат сохраняется в Windows Documents\Teams Transcripts\&lt;timestamp&gt;.</div>
 
       <div class="actions">
         <button id="openCurrentChatFolder" disabled>Открыть папку</button>
-        <button id="currentChatDiagnostic">Скопировать диагностику</button>
+        <button id="currentChatDiagnostic">Диагностика сообщений</button>
         <button id="resetCurrentChatExport">Сбросить</button>
       </div>
     </section>

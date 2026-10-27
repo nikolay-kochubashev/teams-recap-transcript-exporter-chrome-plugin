@@ -2,6 +2,9 @@
   let pollTimer = null;
 
   const rangeMode = document.getElementById('currentChatRangeMode');
+  const periodWrap = document.getElementById('currentChatPeriodWrap');
+  const periodFromInput = document.getElementById('currentChatPeriodFrom');
+  const periodToInput = document.getElementById('currentChatPeriodTo');
   const sinceWrap = document.getElementById('currentChatSinceWrap');
   const sinceInput = document.getElementById('currentChatSince');
   const monthsWrap = document.getElementById('currentChatMonthsWrap');
@@ -63,6 +66,7 @@
 
   function syncRangeUi() {
     const mode = rangeMode.value;
+    periodWrap.hidden = mode !== 'period';
     sinceWrap.hidden = mode !== 'since';
     monthsWrap.hidden = mode !== 'months';
   }
@@ -70,6 +74,8 @@
   async function savePreferences() {
     await chrome.storage.local.set({
       currentChatRangeMode: rangeMode.value,
+      currentChatPeriodFrom: periodFromInput.value,
+      currentChatPeriodTo: periodToInput.value,
       currentChatSince: sinceInput.value,
       currentChatMonths: monthsInput.value
     });
@@ -78,21 +84,38 @@
   function buildRange() {
     const mode = rangeMode.value;
     const today = new Date();
-    const endDate = dateStamp(today);
+    const todayStamp = dateStamp(today);
 
     if (mode === 'all') {
       return { mode, startDate: '', endDate: '', months: 0 };
     }
 
+    if (mode === 'period') {
+      const startDate = stampFromIso(periodFromInput.value);
+      const endDate = stampFromIso(periodToInput.value);
+
+      if (!/^\d{8}$/.test(startDate) || !/^\d{8}$/.test(endDate)) {
+        throw new Error('Укажи начало и конец периода.');
+      }
+      if (startDate > endDate) {
+        throw new Error('Дата начала периода не может быть позже даты окончания.');
+      }
+      if (endDate > todayStamp) {
+        throw new Error('Дата окончания периода не может быть в будущем.');
+      }
+
+      return { mode, startDate, endDate, months: 0 };
+    }
+
     if (mode === 'since') {
       const startDate = stampFromIso(sinceInput.value);
       if (!/^\d{8}$/.test(startDate)) {
-        throw new Error('Укажи дату, с которой читать чат.');
+        throw new Error('Укажи дату, с которой читать сообщения.');
       }
-      if (startDate > endDate) {
+      if (startDate > todayStamp) {
         throw new Error('Начальная дата не может быть в будущем.');
       }
-      return { mode, startDate, endDate, months: 0 };
+      return { mode, startDate, endDate: todayStamp, months: 0 };
     }
 
     const months = Math.max(1, Math.min(60, Number(monthsInput.value || 0)));
@@ -100,7 +123,7 @@
     return {
       mode,
       startDate: dateStamp(monthsAgo(months)),
-      endDate,
+      endDate: todayStamp,
       months
     };
   }
@@ -114,10 +137,12 @@
     openFolderBtn.disabled = !state?.filePath;
     diagnosticBtn.disabled = running;
     rangeMode.disabled = running;
+    periodFromInput.disabled = running;
+    periodToInput.disabled = running;
     sinceInput.disabled = running;
     monthsInput.disabled = running;
 
-    statusEl.textContent = state?.message || 'Открой нужный чат Teams.';
+    statusEl.textContent = state?.message || 'Открой нужный чат Teams и выбери диапазон сообщений.';
 
     const progress = Math.max(0, Math.min(100, Number(state?.progress || 0)));
     progressBar.style.width = progress + '%';
@@ -149,6 +174,8 @@
     syncRangeUi();
     await savePreferences();
   });
+  periodFromInput.addEventListener('change', savePreferences);
+  periodToInput.addEventListener('change', savePreferences);
   sinceInput.addEventListener('change', savePreferences);
   monthsInput.addEventListener('change', savePreferences);
 
@@ -171,7 +198,7 @@
 
       if (!response?.ok) throw new Error(response?.error || 'Не удалось запустить сбор.');
 
-      statusEl.textContent = 'Запускаю чтение текущего чата...';
+      statusEl.textContent = 'Запускаю чтение сообщений текущего чата...';
       ensurePolling();
       setTimeout(refresh, 250);
     } catch (e) {
@@ -212,7 +239,7 @@
       const response = await chrome.tabs.sendMessage(tab.id, { type: 'CURRENT_CHAT_DIAGNOSTIC' });
       if (!response?.ok) throw new Error(response?.error || 'Не удалось получить диагностику.');
       await navigator.clipboard.writeText(response.text || '');
-      statusEl.textContent = 'Диагностика текущего чата скопирована в буфер обмена.';
+      statusEl.textContent = 'Диагностика сообщений текущего чата скопирована в буфер обмена.';
     } catch (e) {
       statusEl.textContent = 'Ошибка диагностики: ' + (e.message || e);
     }
@@ -227,6 +254,8 @@
   (async () => {
     const saved = await chrome.storage.local.get([
       'currentChatRangeMode',
+      'currentChatPeriodFrom',
+      'currentChatPeriodTo',
       'currentChatSince',
       'currentChatMonths'
     ]);
@@ -234,10 +263,16 @@
     rangeMode.value = saved.currentChatRangeMode || 'all';
     monthsInput.value = saved.currentChatMonths || '3';
 
+    const defaultFrom = isoDate(dateStamp(monthsAgo(1)));
+    const defaultTo = isoDate(dateStamp(new Date()));
+
+    periodFromInput.value = saved.currentChatPeriodFrom || defaultFrom;
+    periodToInput.value = saved.currentChatPeriodTo || defaultTo;
+
     if (saved.currentChatSince) {
       sinceInput.value = saved.currentChatSince;
     } else {
-      sinceInput.value = isoDate(dateStamp(monthsAgo(1)));
+      sinceInput.value = defaultFrom;
     }
 
     syncRangeUi();

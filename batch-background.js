@@ -1377,7 +1377,7 @@ async function processMeeting(meeting, index) {
     message: `Обрабатываю ${index + 1}/${batchState.selectedIds.length}: ${meeting.title || meeting.label}`
   });
 
-  const sourceCalendarTabId = batchState.workerTabId;
+  const sourceCalendarTabId = batchState.calendarTabId;
   let workerTabId = null;
 
   try {

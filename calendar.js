@@ -1394,12 +1394,74 @@
     return { message, heading, headingText };
   }
 
+  function meetingRecapCardElements() {
+    const out = [];
+    const seen = new Set();
+
+    const add = el => {
+      if (!el || !isRendered(el) || seen.has(el)) return;
+      seen.add(el);
+      out.push(el);
+    };
+
+    document.querySelectorAll(
+      '[data-testid="meeting-recap-object"],[data-testid="meeting-recap-chiclet"]'
+    ).forEach(add);
+
+    // New Teams builds can drop the old meeting-recap data-testid values.
+    // Recover the card from its visible "View recap"/"Recap" action and walk
+    // upward until the container contains Transcript plus a dated time range.
+    const recapButtons = Array.from(document.querySelectorAll(
+      'button,a[href],[role="button"],[role="link"],[tabindex]'
+    )).filter(isRendered).filter(el =>
+      /^(?:view\s+recap|open\s+recap|recap|обзор встречи|итоги встречи)$/i.test(interactiveText(el))
+    );
+
+    for (const button of recapButtons) {
+      let node = button;
+      for (let depth = 0; node && depth < 9; depth++, node = node.parentElement) {
+        if (!(node instanceof Element)) break;
+        const text = normalize(node.innerText || node.textContent || '');
+        if (
+          text.length > 40 &&
+          text.length < 3000 &&
+          /\b(?:transcript|транскрипт|расшифровка)\b/i.test(text) &&
+          parseFlexibleDate(text, currentCalendarMonthYear()?.year) &&
+          (parseExplicitTimeRange(text) || timeRegex.test(text))
+        ) {
+          add(node);
+          break;
+        }
+      }
+    }
+
+    return out;
+  }
+
+  function transcriptActionsInsideCard(card) {
+    const direct = Array.from(card.querySelectorAll(
+      'button,[role="button"],a[href],[role="link"],[tabindex]'
+    )).filter(isRendered).filter(el =>
+      /^(?:transcript|транскрипт|расшифровка)(?:\s|$)/i.test(interactiveText(el))
+    );
+
+    const seen = new Set(direct);
+    for (const node of Array.from(card.querySelectorAll('*')).filter(isRendered)) {
+      const text = normalize(node.innerText || node.textContent || '');
+      if (!/^(?:transcript|транскрипт|расшифровка)$/i.test(text)) continue;
+      const clickable = clickableAncestor(node, 5);
+      if (clickable && card.contains(clickable) && !seen.has(clickable)) {
+        seen.add(clickable);
+        direct.push(clickable);
+      }
+    }
+    return direct;
+  }
+
   function findMeetingRecap(meeting) {
     actionMap = new Map();
 
-    const cards = Array.from(document.querySelectorAll(
-      '[data-testid="meeting-recap-object"], [data-testid="meeting-recap-chiclet"]'
-    )).filter(isRendered);
+    const cards = meetingRecapCardElements();
 
     const expectedTitle = normalizedComparable(meeting?.title || '');
     const expectedDate = meeting?.dateStamp || '';
@@ -1446,14 +1508,16 @@
       const recordingButton = card.querySelector(
         '[data-testid="meeting-recap-chiclet-recording-image"]'
       );
-      const transcriptButtons = Array.from(card.querySelectorAll(
-        'button,[role="button"],a[href]'
-      )).filter(el =>
-        /^(?:transcript|транскрипт|расшифровка)(?:\s|$)/i.test(interactiveText(el))
-      );
-      const viewRecapButton = card.querySelector(
-        '[data-testid="view-meeting-recap-button"], [data-testid="meeting-recap-chiclet-view-recap-button"]'
-      );
+      const transcriptButtons = transcriptActionsInsideCard(card);
+      const viewRecapButton =
+        card.querySelector(
+          '[data-testid="view-meeting-recap-button"],[data-testid="meeting-recap-chiclet-view-recap-button"]'
+        ) ||
+        Array.from(card.querySelectorAll(
+          'button,a[href],[role="button"],[role="link"],[tabindex]'
+        )).filter(isRendered).find(el =>
+          /^(?:view\s+recap|open\s+recap|recap|обзор встречи|итоги встречи)$/i.test(interactiveText(el))
+        );
 
       const sessionKey = `${dateStamp}|${sessionStartTime}|${sessionEndTime}|${hash(headingText)}`;
       const actions = {};

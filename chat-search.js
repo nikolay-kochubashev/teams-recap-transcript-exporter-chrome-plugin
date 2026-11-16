@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = '2.6.9';
+  const VERSION = '2.6.10';
   const debugState = {
     stage: 'idle',
     lastQuery: '',
@@ -420,9 +420,43 @@
     return author;
   }
 
+  function dateFilterInputs(root = document) {
+    return Array.from(root.querySelectorAll('input'))
+      .filter(isRendered)
+      .filter(input => {
+        const placeholder = normalize(input.getAttribute('placeholder') || '');
+        const aria = normalize(input.getAttribute('aria-label') || '');
+        const value = normalize(input.value || '');
+        return /select\s+a\s+date/i.test(placeholder) ||
+          /^(?:from|to)(?:\s|$)/i.test(aria) ||
+          /\b\d{1,2}\s+[A-Za-zА-Яа-яЁё]+\s+20\d{2}\b/.test(value);
+      });
+  }
+
   function findDatePopup() {
-    return Array.from(document.querySelectorAll('[data-tid="search-date-filter"]'))
-      .find(el => el.querySelector('input[placeholder="Select a Date"]') && isRendered(el)) || null;
+    return Array.from(document.querySelectorAll('[data-tid="search-date-filter"],[role="dialog"]'))
+      .find(el => isRendered(el) && dateFilterInputs(el).length >= 2) || null;
+  }
+
+  function dateInputText(stamp, input) {
+    if (!/^\d{8}$/.test(String(stamp || ''))) throw new Error('Invalid date stamp: ' + stamp);
+
+    const yyyy = Number(stamp.slice(0, 4));
+    const mm = Number(stamp.slice(4, 6));
+    const dd = Number(stamp.slice(6, 8));
+    const date = new Date(yyyy, mm - 1, dd);
+
+    // Current Teams Search can have lang=ru-KZ while the Date popup itself is
+    // English. Reuse the visible To-value as a format hint; otherwise prefer
+    // en-GB because Teams renders "16 November 2026" in this build.
+    const sample = normalize(input?.value || '');
+    const locale = /[A-Za-z]/.test(sample) ? 'en-GB' : (document.documentElement.lang || 'en-GB');
+
+    return new Intl.DateTimeFormat(locale, {
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric'
+    }).format(date).replace(/\s+г\.?$/i, '');
   }
 
   async function applyDateRange(startStamp, endStamp) {
@@ -432,15 +466,15 @@
 
     clickElement(dateButton);
     const popup = await waitFor(findDatePopup, 8000);
-    const dateInputs = Array.from(popup.querySelectorAll('input[placeholder="Select a Date"]'));
+    const dateInputs = dateFilterInputs(popup);
 
-    let fromInput = dateInputs.find(x => /^From/i.test(x.getAttribute('aria-label') || '')) || dateInputs[0];
-    let toInput = dateInputs.find(x => /^To/i.test(x.getAttribute('aria-label') || '')) || dateInputs[1];
+    let fromInput = dateInputs.find(x => /^From(?:\s|$)/i.test(x.getAttribute('aria-label') || '')) || dateInputs[0];
+    let toInput = dateInputs.find(x => /^To(?:\s|$)/i.test(x.getAttribute('aria-label') || '')) || dateInputs[1];
 
     if (!fromInput || !toInput) throw new Error('Поля From/To фильтра Date не найдены.');
 
-    const fromText = formatDateStamp(startStamp);
-    const toText = formatDateStamp(endStamp);
+    const fromText = dateInputText(startStamp, toInput || fromInput);
+    const toText = dateInputText(endStamp, toInput || fromInput);
 
     fromInput.removeAttribute('readonly');
     toInput.removeAttribute('readonly');

@@ -1,4 +1,4 @@
-Teams Recap Transcript Exporter v2.6.9
+Teams Recap Transcript Exporter v2.6.10
 
 Назначение
 ----------
@@ -272,3 +272,12 @@ Teams Search используется только для discovery. Полны�
 - добавлен режим "За период" с отдельными датами начала и окончания;
 - визуальные элементы переименованы под работу именно с сообщениями: "Диапазон сообщений", "Считать сообщения", "Диагностика сообщений";
 - диапазон валидируется и в UI, и в collector: дата начала не может быть позже даты окончания.
+
+
+В версии 2.6.10:
+- пакетный сбор встреч предпочитает occurrence-specific "Recap/View recap" из popup конкретной календарной встречи вместо обязательного перехода через Chat;
+- для recurring meeting прямой Transcript разрешен, если Recap был открыт из точной Calendar occurrence;
+- возврат из Meeting/Chat в Calendar использует semantic/data-tid поиск и поддерживает icon-only Calendar control;
+- режим "Чаты за неделю" поддерживает актуальный Date popup Teams с placeholder "Select a date";
+- поиск полей From/To больше не зависит от регистра placeholder;
+- формат вводимой даты определяется по видимому значению поля To, поэтому English Date popup работает даже при lang=ru-KZ.

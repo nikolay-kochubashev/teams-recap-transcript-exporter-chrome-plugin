@@ -1287,6 +1287,73 @@ async function restoreCalendarForMeeting(tabId, meeting, timeoutMs = 30000) {
   return { ok: false };
 }
 
+async function createMeetingWorkerTab(sourceCalendarTabId, meeting) {
+  const source = await chrome.tabs.get(sourceCalendarTabId);
+  let worker = null;
+
+  try {
+    worker = await chrome.tabs.duplicate(sourceCalendarTabId);
+  } catch (_) {
+    worker = await chrome.tabs.create({
+      url: source.url || 'https://teams.cloud.microsoft/',
+      active: false,
+      windowId: source.windowId
+    });
+  }
+
+  if (!worker?.id) throw new Error('Не удалось создать временную вкладку для встречи.');
+
+  const workerTabId = worker.id;
+
+  try {
+    await chrome.tabs.update(workerTabId, { active: false });
+    await waitTabComplete(workerTabId, 30000);
+    await delay(900);
+
+    // Ensure the extension scripts are alive in the duplicated/new Teams tab.
+    try {
+      await sendTab(workerTabId, { type: 'PAGE_GET_CONTEXT' }, 5000);
+    } catch (_) {
+      await injectTopFrameScripts(workerTabId);
+      await delay(350);
+    }
+
+    const restored = await restoreCalendarForMeeting(workerTabId, meeting, 30000);
+    if (!restored.ok) {
+      throw new Error('Временная вкладка не смогла открыть нужную встречу в Calendar.');
+    }
+
+    await appendOperation('MEETING_WORKER_READY', {
+      meetingId: meeting.id,
+      sourceCalendarTabId,
+      workerTabId,
+      url: restored.url || ''
+    });
+
+    return workerTabId;
+  } catch (e) {
+    try { await chrome.tabs.remove(workerTabId); } catch (_) {}
+    throw e;
+  }
+}
+
+async function closeMeetingWorkerTab(workerTabId, meeting) {
+  if (!workerTabId) return;
+  try {
+    await chrome.tabs.remove(workerTabId);
+    await appendOperation('MEETING_WORKER_CLOSED', {
+      meetingId: meeting?.id || '',
+      workerTabId
+    });
+  } catch (e) {
+    await appendOperation('MEETING_WORKER_CLOSE_FAILED', {
+      meetingId: meeting?.id || '',
+      workerTabId,
+      error: e?.message || String(e)
+    }, 'WARN');
+  }
+}
+
 async function processMeeting(meeting, index) {
   await appendOperation('MEETING_START', {
     meetingId: meeting.id,
@@ -1310,20 +1377,14 @@ async function processMeeting(meeting, index) {
     message: `Обрабатываю ${index + 1}/${batchState.selectedIds.length}: ${meeting.title || meeting.label}`
   });
 
-  const calendarTabId = batchState.calendarTabId;
+  const sourceCalendarTabId = batchState.workerTabId;
+  let workerTabId = null;
 
   try {
-    const restoredBefore = await restoreCalendarForMeeting(calendarTabId, meeting, 20000);
-    if (!restoredBefore.ok) {
-      await appendOperation('MEETING_NOT_VISIBLE_IN_CALENDAR', {
-        meetingId: meeting.id,
-        calendarTabId
-      }, 'ERROR');
-      throw new Error('Не удалось восстановить календарь с выбранной встречей. Обнови Calendar, заново нажми "Считать календарь" и повтори запуск.');
-    }
+    workerTabId = await createMeetingWorkerTab(sourceCalendarTabId, meeting);
 
     const opened = await sendTab(
-      calendarTabId,
+      workerTabId,
       { type: 'CALENDAR_OPEN_MEETING_CHAT', meeting },
       15000
     );
@@ -1331,7 +1392,7 @@ async function processMeeting(meeting, index) {
     if (!opened?.ok) {
       await appendOperation('OPEN_MEETING_FAILED', {
         meetingId: meeting.id,
-        calendarTabId,
+        workerTabId,
         error: opened?.error || '',
         attempts: opened?.attempts || [],
         diagnostic: opened?.diagnostic || null,
@@ -1342,7 +1403,8 @@ async function processMeeting(meeting, index) {
 
     await appendOperation('OPEN_MEETING_VIEW_OK', {
       meetingId: meeting.id,
-      calendarTabId,
+      sourceCalendarTabId,
+      workerTabId,
       mode: opened.mode || '',
       url: opened.url || '',
       target: opened.target || {},
@@ -1360,7 +1422,7 @@ async function processMeeting(meeting, index) {
     let directFile = null;
     if (opened.occurrenceBound) {
       directFile = await tryExtractTranscriptFromMeetingDetails(
-        calendarTabId,
+        workerTabId,
         meeting,
         { occurrenceBound: true }
       );
@@ -1372,7 +1434,7 @@ async function processMeeting(meeting, index) {
       // Otherwise bind extraction to the exact dated recap card. This remains
       // mandatory for recurring meetings reached through generic chat/details.
       const exactFiles = await tryExtractTranscriptsFromExactRecap(
-        calendarTabId,
+        workerTabId,
         meeting
       );
 
@@ -1380,18 +1442,18 @@ async function processMeeting(meeting, index) {
         files.push(...exactFiles);
       } else {
         directFile = await tryExtractTranscriptFromMeetingDetails(
-          calendarTabId,
+          workerTabId,
           meeting
         );
 
         if (directFile) {
           files.push(directFile);
         } else {
-          const urls = await discoverRecordingUrls(calendarTabId, meeting);
+          const urls = await discoverRecordingUrls(workerTabId, meeting);
 
       await appendOperation('RECORDING_URLS_RESULT', {
         meetingId: meeting.id,
-        calendarTabId,
+        workerTabId,
         count: urls.length,
         urls
       });
@@ -1449,14 +1511,7 @@ async function processMeeting(meeting, index) {
       files: []
     });
   } finally {
-    const restored = await restoreCalendarForMeeting(calendarTabId, meeting, 30000);
-    await appendOperation('CALENDAR_RESTORE_RESULT', {
-      meetingId: meeting.id,
-      calendarTabId,
-      restored: restored.ok,
-      url: restored.url || ''
-    }, restored.ok ? 'INFO' : 'WARN');
-
+    await closeMeetingWorkerTab(workerTabId, meeting);
     try { await saveBatchLogs(); } catch (_) {}
   }
 }

@@ -1289,61 +1289,88 @@ async function restoreCalendarForMeeting(tabId, meeting, timeoutMs = 30000) {
 
 async function createMeetingWorkerTab(sourceCalendarTabId, meeting) {
   const source = await chrome.tabs.get(sourceCalendarTabId);
-  let worker = null;
+  let lastError = null;
 
-  try {
-    worker = await chrome.tabs.duplicate(sourceCalendarTabId);
-  } catch (_) {
-    worker = await chrome.tabs.create({
-      url: source.url || 'https://teams.cloud.microsoft/',
-      active: true,
-      windowId: source.windowId
-    });
-  }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let worker = null;
 
-  if (!worker?.id) throw new Error('Не удалось создать временную вкладку для встречи.');
-
-  const workerTabId = worker.id;
-
-  try {
-    // Teams virtualizes Calendar aggressively in background tabs. The worker
-    // must be the active tab while we resolve the exact occurrence and Recap.
-    await chrome.tabs.update(workerTabId, { active: true });
-    await waitTabComplete(workerTabId, 30000);
-    await delay(1400);
-
-    await appendOperation('MEETING_WORKER_ACTIVATED', {
-      meetingId: meeting.id,
-      sourceCalendarTabId,
-      workerTabId
-    });
-
-    // Ensure the extension scripts are alive in the duplicated/new Teams tab.
     try {
-      await sendTab(workerTabId, { type: 'PAGE_GET_CONTEXT' }, 5000);
-    } catch (_) {
-      await injectTopFrameScripts(workerTabId);
-      await delay(500);
+      if (attempt === 0) {
+        worker = await chrome.tabs.duplicate(sourceCalendarTabId);
+      } else {
+        worker = await chrome.tabs.create({
+          url: source.url || 'https://teams.cloud.microsoft/',
+          active: true,
+          windowId: source.windowId
+        });
+      }
+
+      if (!worker?.id) throw new Error('Не удалось создать временную вкладку для встречи.');
+
+      const workerTabId = worker.id;
+
+      // Teams virtualizes Calendar aggressively in background tabs. The worker
+      // must be the active tab while we resolve the exact occurrence and Recap.
+      await chrome.tabs.update(workerTabId, { active: true });
+      await waitTabComplete(workerTabId, 30000);
+      await delay(1400);
+
+      await appendOperation('MEETING_WORKER_ACTIVATED', {
+        meetingId: meeting.id,
+        sourceCalendarTabId,
+        workerTabId,
+        attempt: attempt + 1,
+        strategy: attempt === 0 ? 'duplicate' : 'new-tab'
+      });
+
+      // Ensure the extension scripts are alive in the duplicated/new Teams tab.
+      try {
+        await sendTab(workerTabId, { type: 'PAGE_GET_CONTEXT' }, 5000);
+      } catch (_) {
+        await injectTopFrameScripts(workerTabId);
+        await delay(500);
+      }
+
+      const restored = await restoreCalendarForMeeting(workerTabId, meeting, 30000);
+      if (!restored.ok) {
+        throw new Error('Временная вкладка не смогла открыть нужную встречу в Calendar.');
+      }
+
+      await appendOperation('MEETING_WORKER_READY', {
+        meetingId: meeting.id,
+        sourceCalendarTabId,
+        workerTabId,
+        attempt: attempt + 1,
+        url: restored.url || ''
+      });
+
+      return workerTabId;
+    } catch (e) {
+      lastError = e;
+
+      const workerTabId = worker?.id || null;
+      await appendOperation('MEETING_WORKER_ATTEMPT_FAILED', {
+        meetingId: meeting.id,
+        sourceCalendarTabId,
+        workerTabId,
+        attempt: attempt + 1,
+        strategy: attempt === 0 ? 'duplicate' : 'new-tab',
+        error: e?.message || String(e)
+      }, 'WARN');
+
+      if (workerTabId) {
+        try { await chrome.tabs.remove(workerTabId); } catch (_) {}
+      }
+
+      try { await chrome.tabs.update(sourceCalendarTabId, { active: true }); } catch (_) {}
+
+      if (attempt === 0) {
+        await delay(700);
+      }
     }
-
-    const restored = await restoreCalendarForMeeting(workerTabId, meeting, 30000);
-    if (!restored.ok) {
-      throw new Error('Временная вкладка не смогла открыть нужную встречу в Calendar.');
-    }
-
-    await appendOperation('MEETING_WORKER_READY', {
-      meetingId: meeting.id,
-      sourceCalendarTabId,
-      workerTabId,
-      url: restored.url || ''
-    });
-
-    return workerTabId;
-  } catch (e) {
-    try { await chrome.tabs.remove(workerTabId); } catch (_) {}
-    try { await chrome.tabs.update(sourceCalendarTabId, { active: true }); } catch (_) {}
-    throw e;
   }
+
+  throw lastError || new Error('Не удалось создать временную вкладку для встречи.');
 }
 
 async function closeMeetingWorkerTab(workerTabId, meeting, sourceCalendarTabId = null) {

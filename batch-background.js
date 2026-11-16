@@ -1296,7 +1296,7 @@ async function createMeetingWorkerTab(sourceCalendarTabId, meeting) {
   } catch (_) {
     worker = await chrome.tabs.create({
       url: source.url || 'https://teams.cloud.microsoft/',
-      active: false,
+      active: true,
       windowId: source.windowId
     });
   }
@@ -1306,16 +1306,24 @@ async function createMeetingWorkerTab(sourceCalendarTabId, meeting) {
   const workerTabId = worker.id;
 
   try {
-    await chrome.tabs.update(workerTabId, { active: false });
+    // Teams virtualizes Calendar aggressively in background tabs. The worker
+    // must be the active tab while we resolve the exact occurrence and Recap.
+    await chrome.tabs.update(workerTabId, { active: true });
     await waitTabComplete(workerTabId, 30000);
-    await delay(900);
+    await delay(1400);
+
+    await appendOperation('MEETING_WORKER_ACTIVATED', {
+      meetingId: meeting.id,
+      sourceCalendarTabId,
+      workerTabId
+    });
 
     // Ensure the extension scripts are alive in the duplicated/new Teams tab.
     try {
       await sendTab(workerTabId, { type: 'PAGE_GET_CONTEXT' }, 5000);
     } catch (_) {
       await injectTopFrameScripts(workerTabId);
-      await delay(350);
+      await delay(500);
     }
 
     const restored = await restoreCalendarForMeeting(workerTabId, meeting, 30000);
@@ -1333,12 +1341,19 @@ async function createMeetingWorkerTab(sourceCalendarTabId, meeting) {
     return workerTabId;
   } catch (e) {
     try { await chrome.tabs.remove(workerTabId); } catch (_) {}
+    try { await chrome.tabs.update(sourceCalendarTabId, { active: true }); } catch (_) {}
     throw e;
   }
 }
 
-async function closeMeetingWorkerTab(workerTabId, meeting) {
-  if (!workerTabId) return;
+async function closeMeetingWorkerTab(workerTabId, meeting, sourceCalendarTabId = null) {
+  if (!workerTabId) {
+    if (sourceCalendarTabId) {
+      try { await chrome.tabs.update(sourceCalendarTabId, { active: true }); } catch (_) {}
+    }
+    return;
+  }
+
   try {
     await chrome.tabs.remove(workerTabId);
     await appendOperation('MEETING_WORKER_CLOSED', {
@@ -1351,6 +1366,13 @@ async function closeMeetingWorkerTab(workerTabId, meeting) {
       workerTabId,
       error: e?.message || String(e)
     }, 'WARN');
+  } finally {
+    if (sourceCalendarTabId) {
+      try {
+        await chrome.tabs.update(sourceCalendarTabId, { active: true });
+        await delay(250);
+      } catch (_) {}
+    }
   }
 }
 
@@ -1511,7 +1533,7 @@ async function processMeeting(meeting, index) {
       files: []
     });
   } finally {
-    await closeMeetingWorkerTab(workerTabId, meeting);
+    await closeMeetingWorkerTab(workerTabId, meeting, sourceCalendarTabId);
     try { await saveBatchLogs(); } catch (_) {}
   }
 }

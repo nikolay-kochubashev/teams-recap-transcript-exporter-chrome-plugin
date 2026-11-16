@@ -1287,122 +1287,6 @@ async function restoreCalendarForMeeting(tabId, meeting, timeoutMs = 30000) {
   return { ok: false };
 }
 
-async function createMeetingWorkerTab(sourceCalendarTabId, meeting) {
-  const source = await chrome.tabs.get(sourceCalendarTabId);
-  let lastError = null;
-
-  for (let attempt = 0; attempt < 2; attempt++) {
-    let worker = null;
-
-    try {
-      if (attempt === 0) {
-        worker = await chrome.tabs.duplicate(sourceCalendarTabId);
-      } else {
-        worker = await chrome.tabs.create({
-          url: source.url || 'https://teams.cloud.microsoft/',
-          active: true,
-          windowId: source.windowId
-        });
-      }
-
-      if (!worker?.id) throw new Error('Не удалось создать временную вкладку для встречи.');
-
-      const workerTabId = worker.id;
-
-      // Teams virtualizes Calendar aggressively in background tabs. The worker
-      // must be the active tab while we resolve the exact occurrence and Recap.
-      await chrome.tabs.update(workerTabId, { active: true });
-      await waitTabComplete(workerTabId, 30000);
-      await delay(1400);
-
-      await appendOperation('MEETING_WORKER_ACTIVATED', {
-        meetingId: meeting.id,
-        sourceCalendarTabId,
-        workerTabId,
-        attempt: attempt + 1,
-        strategy: attempt === 0 ? 'duplicate' : 'new-tab'
-      });
-
-      // Ensure the extension scripts are alive in the duplicated/new Teams tab.
-      try {
-        await sendTab(workerTabId, { type: 'PAGE_GET_CONTEXT' }, 5000);
-      } catch (_) {
-        await injectTopFrameScripts(workerTabId);
-        await delay(500);
-      }
-
-      const restored = await restoreCalendarForMeeting(workerTabId, meeting, 30000);
-      if (!restored.ok) {
-        throw new Error('Временная вкладка не смогла открыть нужную встречу в Calendar.');
-      }
-
-      await appendOperation('MEETING_WORKER_READY', {
-        meetingId: meeting.id,
-        sourceCalendarTabId,
-        workerTabId,
-        attempt: attempt + 1,
-        url: restored.url || ''
-      });
-
-      return workerTabId;
-    } catch (e) {
-      lastError = e;
-
-      const workerTabId = worker?.id || null;
-      await appendOperation('MEETING_WORKER_ATTEMPT_FAILED', {
-        meetingId: meeting.id,
-        sourceCalendarTabId,
-        workerTabId,
-        attempt: attempt + 1,
-        strategy: attempt === 0 ? 'duplicate' : 'new-tab',
-        error: e?.message || String(e)
-      }, 'WARN');
-
-      if (workerTabId) {
-        try { await chrome.tabs.remove(workerTabId); } catch (_) {}
-      }
-
-      try { await chrome.tabs.update(sourceCalendarTabId, { active: true }); } catch (_) {}
-
-      if (attempt === 0) {
-        await delay(700);
-      }
-    }
-  }
-
-  throw lastError || new Error('Не удалось создать временную вкладку для встречи.');
-}
-
-async function closeMeetingWorkerTab(workerTabId, meeting, sourceCalendarTabId = null) {
-  if (!workerTabId) {
-    if (sourceCalendarTabId) {
-      try { await chrome.tabs.update(sourceCalendarTabId, { active: true }); } catch (_) {}
-    }
-    return;
-  }
-
-  try {
-    await chrome.tabs.remove(workerTabId);
-    await appendOperation('MEETING_WORKER_CLOSED', {
-      meetingId: meeting?.id || '',
-      workerTabId
-    });
-  } catch (e) {
-    await appendOperation('MEETING_WORKER_CLOSE_FAILED', {
-      meetingId: meeting?.id || '',
-      workerTabId,
-      error: e?.message || String(e)
-    }, 'WARN');
-  } finally {
-    if (sourceCalendarTabId) {
-      try {
-        await chrome.tabs.update(sourceCalendarTabId, { active: true });
-        await delay(250);
-      } catch (_) {}
-    }
-  }
-}
-
 async function processMeeting(meeting, index) {
   await appendOperation('MEETING_START', {
     meetingId: meeting.id,
@@ -1426,14 +1310,22 @@ async function processMeeting(meeting, index) {
     message: `Обрабатываю ${index + 1}/${batchState.selectedIds.length}: ${meeting.title || meeting.label}`
   });
 
-  const sourceCalendarTabId = batchState.calendarTabId;
-  let workerTabId = null;
+  const calendarTabId = batchState.calendarTabId;
 
   try {
-    workerTabId = await createMeetingWorkerTab(sourceCalendarTabId, meeting);
+    // Work only in the original Teams tab. If the previous meeting left us in
+    // Chat/Recap, recover Calendar here, immediately before the next item.
+    const restoredBefore = await restoreCalendarForMeeting(calendarTabId, meeting, 30000);
+    if (!restoredBefore.ok) {
+      await appendOperation('MEETING_NOT_VISIBLE_IN_CALENDAR', {
+        meetingId: meeting.id,
+        calendarTabId
+      }, 'ERROR');
+      throw new Error('Не удалось восстановить Calendar с выбранной встречей.');
+    }
 
     const opened = await sendTab(
-      workerTabId,
+      calendarTabId,
       { type: 'CALENDAR_OPEN_MEETING_CHAT', meeting },
       15000
     );
@@ -1441,19 +1333,18 @@ async function processMeeting(meeting, index) {
     if (!opened?.ok) {
       await appendOperation('OPEN_MEETING_FAILED', {
         meetingId: meeting.id,
-        workerTabId,
+        calendarTabId,
         error: opened?.error || '',
         attempts: opened?.attempts || [],
         diagnostic: opened?.diagnostic || null,
         target: opened?.target || null
       }, 'ERROR');
-      throw new Error(opened?.error || 'Не удалось открыть чат выбранной встречи из Calendar.');
+      throw new Error(opened?.error || 'Не удалось открыть выбранную встречу из Calendar.');
     }
 
     await appendOperation('OPEN_MEETING_VIEW_OK', {
       meetingId: meeting.id,
-      sourceCalendarTabId,
-      workerTabId,
+      calendarTabId,
       mode: opened.mode || '',
       url: opened.url || '',
       target: opened.target || {},
@@ -1465,13 +1356,10 @@ async function processMeeting(meeting, index) {
 
     const files = [];
 
-    // If Calendar opened this exact occurrence through its own Recap action,
-    // the current Details/Recap surface is already occurrence-bound and is the
-    // safest source, including for recurring meetings.
     let directFile = null;
     if (opened.occurrenceBound) {
       directFile = await tryExtractTranscriptFromMeetingDetails(
-        workerTabId,
+        calendarTabId,
         meeting,
         { occurrenceBound: true }
       );
@@ -1480,10 +1368,8 @@ async function processMeeting(meeting, index) {
     if (directFile) {
       files.push(directFile);
     } else {
-      // Otherwise bind extraction to the exact dated recap card. This remains
-      // mandatory for recurring meetings reached through generic chat/details.
       const exactFiles = await tryExtractTranscriptsFromExactRecap(
-        workerTabId,
+        calendarTabId,
         meeting
       );
 
@@ -1491,42 +1377,41 @@ async function processMeeting(meeting, index) {
         files.push(...exactFiles);
       } else {
         directFile = await tryExtractTranscriptFromMeetingDetails(
-          workerTabId,
+          calendarTabId,
           meeting
         );
 
         if (directFile) {
           files.push(directFile);
         } else {
-          const urls = await discoverRecordingUrls(workerTabId, meeting);
+          const urls = await discoverRecordingUrls(calendarTabId, meeting);
 
-      await appendOperation('RECORDING_URLS_RESULT', {
-        meetingId: meeting.id,
-        workerTabId,
-        count: urls.length,
-        urls
-      });
+          await appendOperation('RECORDING_URLS_RESULT', {
+            meetingId: meeting.id,
+            calendarTabId,
+            count: urls.length,
+            urls
+          });
 
-      if (!urls.length) {
-        await appendOperation('MEETING_SKIP', {
-          meetingId: meeting.id,
-          reason: 'Не удалось открыть Transcript или найти запись выбранной встречи.'
-        }, 'WARN');
+          if (!urls.length) {
+            await appendOperation('MEETING_SKIP', {
+              meetingId: meeting.id,
+              reason: 'Не удалось открыть Transcript или найти запись выбранной встречи.'
+            }, 'WARN');
 
-        await logMeeting(meeting.id, {
-          status: 'skip',
-          message: 'Не удалось открыть Transcript или найти запись выбранной встречи.',
-          files: []
-        });
-        return;
-      }
+            await logMeeting(meeting.id, {
+              status: 'skip',
+              message: 'Не удалось открыть Transcript или найти запись выбранной встречи.',
+              files: []
+            });
+            return;
+          }
 
-      for (let i = 0; i < urls.length; i++) {
-        if (stopRequested) throw new Error('Остановлено пользователем.');
-
-        const file = await processRecordingUrl(urls[i], meeting, i, null);
-        files.push(file);
-      }
+          for (let i = 0; i < urls.length; i++) {
+            if (stopRequested) throw new Error('Остановлено пользователем.');
+            const file = await processRecordingUrl(urls[i], meeting, i, null);
+            files.push(file);
+          }
         }
       }
     }
@@ -1560,7 +1445,9 @@ async function processMeeting(meeting, index) {
       files: []
     });
   } finally {
-    await closeMeetingWorkerTab(workerTabId, meeting, sourceCalendarTabId);
+    // Do not restore Calendar here. The next meeting will recover Calendar at
+    // its own start. This avoids redundant navigation and leaves the final
+    // selected meeting untouched after batch completion.
     try { await saveBatchLogs(); } catch (_) {}
   }
 }

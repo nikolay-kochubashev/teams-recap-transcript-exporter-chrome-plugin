@@ -915,11 +915,13 @@ async function tryExtractTranscriptsFromExactRecap(tabId, meeting) {
   return files;
 }
 
-async function tryExtractTranscriptFromMeetingDetails(tabId, meeting) {
-  // Generic Details/Recap controls are unsafe for recurring meetings because
-  // Teams can keep the series chat open while selecting a different occurrence.
-  // Recurring occurrences are handled only through an exact dated recap card.
-  if (isRecurringMeeting(meeting)) {
+async function tryExtractTranscriptFromMeetingDetails(tabId, meeting, options = {}) {
+  const occurrenceBound = !!options.occurrenceBound;
+
+  // Generic Details/Recap controls are unsafe for recurring meetings unless
+  // the surface was opened directly from the exact Calendar occurrence via its
+  // own Recap action.
+  if (isRecurringMeeting(meeting) && !occurrenceBound) {
     await appendOperation('GENERIC_DETAILS_SKIPPED_FOR_RECURRING', {
       meetingId: meeting.id,
       expectedDate: meeting.dateStamp || ''
@@ -1344,32 +1346,48 @@ async function processMeeting(meeting, index) {
       mode: opened.mode || '',
       url: opened.url || '',
       target: opened.target || {},
-      details: opened.details || null
+      details: opened.details || null,
+      occurrenceBound: !!opened.occurrenceBound
     });
 
     await delay(1200);
 
     const files = [];
 
-    // First bind extraction to the exact dated recap card. This is mandatory
-    // for recurring meetings and also protects one-off meetings from stale UI.
-    const exactFiles = await tryExtractTranscriptsFromExactRecap(
-      calendarTabId,
-      meeting
-    );
+    // If Calendar opened this exact occurrence through its own Recap action,
+    // the current Details/Recap surface is already occurrence-bound and is the
+    // safest source, including for recurring meetings.
+    let directFile = null;
+    if (opened.occurrenceBound) {
+      directFile = await tryExtractTranscriptFromMeetingDetails(
+        calendarTabId,
+        meeting,
+        { occurrenceBound: true }
+      );
+    }
 
-    if (exactFiles.length) {
-      files.push(...exactFiles);
+    if (directFile) {
+      files.push(directFile);
     } else {
-      const directFile = await tryExtractTranscriptFromMeetingDetails(
+      // Otherwise bind extraction to the exact dated recap card. This remains
+      // mandatory for recurring meetings reached through generic chat/details.
+      const exactFiles = await tryExtractTranscriptsFromExactRecap(
         calendarTabId,
         meeting
       );
 
-      if (directFile) {
-        files.push(directFile);
+      if (exactFiles.length) {
+        files.push(...exactFiles);
       } else {
-        const urls = await discoverRecordingUrls(calendarTabId, meeting);
+        directFile = await tryExtractTranscriptFromMeetingDetails(
+          calendarTabId,
+          meeting
+        );
+
+        if (directFile) {
+          files.push(directFile);
+        } else {
+          const urls = await discoverRecordingUrls(calendarTabId, meeting);
 
       await appendOperation('RECORDING_URLS_RESULT', {
         meetingId: meeting.id,
@@ -1398,6 +1416,7 @@ async function processMeeting(meeting, index) {
         const file = await processRecordingUrl(urls[i], meeting, i, null);
         files.push(file);
       }
+        }
       }
     }
 

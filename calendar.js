@@ -2,7 +2,7 @@
   if (window.__teamsTranscriptCalendarLoaded) return;
   window.__teamsTranscriptCalendarLoaded = true;
 
-  const VERSION = '2.0.25';
+  const VERSION = '2.0.26';
   let actionMap = new Map();
   let lastCalendarScanDebug = { rejected: [], candidates: [], acceptedCount: 0 };
 
@@ -737,14 +737,47 @@
     };
   }
 
+  function findCalendarRetryAction() {
+    return Array.from(document.querySelectorAll(
+      'button,[role="button"],a[href],[tabindex]'
+    )).filter(isRendered).find(el => {
+      const text = interactiveText(el);
+      return /^(?:try again|retry|повторить|попробовать снова)$/i.test(text);
+    }) || null;
+  }
+
+  async function recoverCalendarErrorView() {
+    const retry = findCalendarRetryAction();
+    if (!retry) return { attempted: false, recovered: false };
+
+    try { retry.click(); } catch (_) { dispatchPointerSequence(retry); }
+
+    const started = Date.now();
+    while (Date.now() - started < 12000) {
+      await sleep(250);
+      if (
+        visibleCalendarRange() ||
+        document.querySelector('[data-testid="calendar-in-day-event-card"]')
+      ) {
+        return { attempted: true, recovered: true };
+      }
+    }
+
+    return { attempted: true, recovered: false };
+  }
+
   async function openCalendarNavigation() {
     if (visibleCalendarRange() || document.querySelector('[data-testid="calendar-in-day-event-card"]')) {
       return { ok: true, alreadyCalendar: true, url: location.href };
     }
 
-    // Use the same semantic/data-tid aware lookup as date navigation. The
-    // current Teams left rail can render Calendar as an icon-only control whose
-    // visible text is empty, so exact interactiveText matching is no longer safe.
+    // Teams Calendar can remain on its own "Something went wrong" screen.
+    // Recover that state first instead of repeatedly clicking the Calendar rail.
+    const recovered = await recoverCalendarErrorView();
+    if (recovered.recovered) {
+      return { ok: true, alreadyCalendar: true, recovered: true, url: location.href };
+    }
+
     const calendar = findCalendarNavControl('calendar');
 
     if (!calendar) {
@@ -753,6 +786,7 @@
         error: 'Calendar navigation control not found.',
         url: location.href,
         title: document.title,
+        retryAttempted: recovered.attempted,
         diagnostic: calendarNavDiagnostic()
       };
     }
@@ -768,6 +802,12 @@
       ) {
         return { ok: true, alreadyCalendar: false, url: location.href };
       }
+
+      const retryState = await recoverCalendarErrorView();
+      if (retryState.recovered) {
+        return { ok: true, alreadyCalendar: false, recovered: true, url: location.href };
+      }
+
       await sleep(200);
     }
 
@@ -1293,6 +1333,9 @@
   async function navigateToCalendar() {
     if (visibleCalendarRange()) return { ok: true, alreadyThere: true };
 
+    const recovered = await recoverCalendarErrorView();
+    if (recovered.recovered) return { ok: true, alreadyThere: true, recovered: true };
+
     const control = findCalendarNavControl('calendar');
     if (!control) return { ok: false, error: 'Calendar navigation control not found.' };
 
@@ -1300,9 +1343,14 @@
       control.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window, button: 0 }));
     }
 
-    for (let i = 0; i < 30; i++) {
+    for (let i = 0; i < 40; i++) {
       await sleep(300);
       if (visibleCalendarRange()) return { ok: true, alreadyThere: false };
+
+      const retryState = await recoverCalendarErrorView();
+      if (retryState.recovered) {
+        return { ok: true, alreadyThere: false, recovered: true };
+      }
     }
     return { ok: false, error: 'Calendar did not become ready.' };
   }

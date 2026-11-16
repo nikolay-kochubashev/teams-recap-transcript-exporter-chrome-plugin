@@ -2,7 +2,7 @@
   if (window.__teamsTranscriptCalendarLoaded) return;
   window.__teamsTranscriptCalendarLoaded = true;
 
-  const VERSION = '2.0.23';
+  const VERSION = '2.0.24';
   let actionMap = new Map();
   let lastCalendarScanDebug = { rejected: [], candidates: [], acceptedCount: 0 };
 
@@ -512,6 +512,32 @@
     );
   }
 
+  function findMeetingPopupRecapAction(meeting) {
+    const roots = Array.from(document.querySelectorAll(
+      '[data-tid="peek-body-container"],[role="dialog"]'
+    )).filter(isRendered);
+
+    const expectedTitle = normalizedComparable(meeting?.title || '');
+
+    for (const root of roots) {
+      const rootText = normalizedComparable(root.innerText || root.textContent || '');
+      if (expectedTitle && !rootText.includes(expectedTitle)) continue;
+
+      const controls = Array.from(root.querySelectorAll(
+        'button,a[href],[role="button"],[role="link"],[tabindex]'
+      )).filter(isRendered);
+
+      const recap = controls.find(el => {
+        const text = interactiveText(el);
+        return /^(?:view\s+recap|open\s+recap|recap|итоги встречи|обзор встречи)$/i.test(text);
+      });
+
+      if (recap) return recap;
+    }
+
+    return null;
+  }
+
   function findChatWithParticipants(meeting) {
     const pattern = /^(?:chat with participants|чат с участниками)$/i;
     const expectedTitle = normalizedComparable(meeting?.title || '');
@@ -712,32 +738,31 @@
   }
 
   async function openCalendarNavigation() {
-    if (document.querySelector('[data-testid="calendar-in-day-event-card"]')) {
+    if (visibleCalendarRange() || document.querySelector('[data-testid="calendar-in-day-event-card"]')) {
       return { ok: true, alreadyCalendar: true, url: location.href };
     }
 
-    const candidates = Array.from(document.querySelectorAll(
-      'a[href],button,[role="button"],[role="link"],[tabindex]'
-    )).filter(isRendered);
-
-    const calendar = candidates.find(el =>
-      /^(?:calendar|calendar \(ctrl\+shift\+6\)|календарь)$/i.test(interactiveText(el))
-    );
+    // Use the same semantic/data-tid aware lookup as date navigation. The
+    // current Teams left rail can render Calendar as an icon-only control whose
+    // visible text is empty, so exact interactiveText matching is no longer safe.
+    const calendar = findCalendarNavControl('calendar');
 
     if (!calendar) {
       return {
         ok: false,
         error: 'Calendar navigation control not found.',
         url: location.href,
-        title: document.title
+        title: document.title,
+        diagnostic: calendarNavDiagnostic()
       };
     }
 
     try { calendar.click(); } catch (_) { dispatchPointerSequence(calendar); }
 
     const started = Date.now();
-    while (Date.now() - started < 10000) {
+    while (Date.now() - started < 12000) {
       if (
+        visibleCalendarRange() ||
         document.querySelector('[data-testid="calendar-in-day-event-card"]') ||
         /^Calendar$/i.test(normalize(document.querySelector('h1,h2,[role="heading"]')?.textContent || ''))
       ) {
@@ -750,7 +775,8 @@
       ok: false,
       error: 'Calendar did not become ready after navigation click.',
       url: location.href,
-      title: document.title
+      title: document.title,
+      diagnostic: calendarNavDiagnostic()
     };
   }
 
@@ -931,9 +957,16 @@
     async function waitForOpenedState(timeoutMs) {
       const started = Date.now();
       while (Date.now() - started < timeoutMs) {
+        const recapAction = findMeetingPopupRecapAction(meeting);
+        if (recapAction) return { mode: 'popup-recap', recapAction, chatAction: null };
+
         const chatAction = findChatWithParticipants(meeting);
-        if (chatAction) return { mode: 'popup', chatAction };
-        if (meetingDetailsViewMatches(meeting)) return { mode: 'details', chatAction: null };
+        if (chatAction) return { mode: 'popup', recapAction: null, chatAction };
+
+        if (meetingDetailsViewMatches(meeting)) {
+          return { mode: 'details', recapAction: null, chatAction: null };
+        }
+
         await sleep(120);
       }
       return null;
@@ -1033,6 +1066,7 @@
             mode: openedState.mode,
             url: location.href,
             attempts,
+            occurrenceBound: openedState.mode === 'popup-recap',
             activation: attempts[attempts.length - 1],
             target: {
               tag: card.tagName,
@@ -1078,6 +1112,50 @@
       return {
         ok: true,
         mode: 'details',
+        occurrenceBound: false,
+        url: location.href,
+        attempts: opened.attempts || [],
+        target: opened.target || {},
+        details: findMeetingDetailsAssets(meeting)
+      };
+    }
+
+    if (opened.mode === 'popup-recap') {
+      const recapButton = findMeetingPopupRecapAction(meeting);
+      if (!recapButton) {
+        return {
+          ok: false,
+          error: '"Recap" action disappeared after meeting popup opened.',
+          attempts: opened.attempts || [],
+          diagnostic: popupDiagnostic(meeting)
+        };
+      }
+
+      try { recapButton.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (_) {}
+      try { recapButton.focus({ preventScroll: true }); } catch (_) {}
+      try { recapButton.click(); } catch (_) { dispatchPointerSequence(recapButton); }
+
+      const started = Date.now();
+      while (Date.now() - started < 8000) {
+        await sleep(220);
+        const details = findMeetingDetailsAssets(meeting);
+        if (details?.match) {
+          return {
+            ok: true,
+            mode: 'recap',
+            occurrenceBound: true,
+            url: location.href,
+            attempts: opened.attempts || [],
+            target: opened.target || {},
+            details
+          };
+        }
+      }
+
+      return {
+        ok: true,
+        mode: 'recap',
+        occurrenceBound: true,
         url: location.href,
         attempts: opened.attempts || [],
         target: opened.target || {},
